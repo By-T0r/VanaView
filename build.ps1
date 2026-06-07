@@ -4,8 +4,8 @@
 #   - Visual Studio 2022 with the C++ x86 (32-bit) build tools.
 #   - The Ashita v4 plugin SDK headers.
 #
-# Set $sdk below to the folder that contains Ashita.h (normally your
-# Ashita/plugins/sdk directory). FFXI is a 32-bit process, so this builds x86.
+# Set ASHITA_SDK to the Ashita plugin SDK folder that contains Ashita.h.
+# FFXI is a 32-bit process, so this builds x86.
 
 $ErrorActionPreference = 'Stop'
 
@@ -16,13 +16,9 @@ $distDir  = Join-Path $root 'dist'
 $outDll   = Join-Path $distDir 'VanaView.dll'
 $obj      = Join-Path $buildDir 'VanaView.obj'
 
-# ---------------------------------------------------------------------------
-# Point this at your Ashita plugin SDK headers (the folder containing Ashita.h).
-# ---------------------------------------------------------------------------
-$sdk = 'C:\Path\To\Ashita\plugins\sdk'
-
-if (-not (Test-Path (Join-Path $sdk 'Ashita.h'))) {
-    throw "Ashita SDK not found at '$sdk'. Edit the `$sdk path at the top of build.ps1."
+$sdk = $env:ASHITA_SDK
+if ([string]::IsNullOrWhiteSpace($sdk) -or -not (Test-Path (Join-Path $sdk 'Ashita.h'))) {
+    throw 'Ashita SDK not found. Set ASHITA_SDK to the folder that contains Ashita.h.'
 }
 
 $vcvarsCandidates = @(
