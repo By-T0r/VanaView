@@ -11,6 +11,7 @@
 #include <cstring>
 
 #pragma comment(linker, "/EXPORT:expCreatePlugin=_expCreatePlugin@4")
+#pragma comment(linker, "/EXPORT:expDestroyPlugin=_expDestroyPlugin@4")
 #pragma comment(linker, "/EXPORT:expGetInterfaceVersion=_expGetInterfaceVersion@0")
 
 namespace
@@ -339,10 +340,10 @@ class VanaView final : public IPlugin
 {
 public:
     const char* GetName(void) const override { return "VanaView"; }
-    const char* GetAuthor(void) const override { return "rockmizx"; }
+    const char* GetAuthor(void) const override { return "rockerudon"; }
     const char* GetDescription(void) const override { return "Tunes world draw distance, map LoD, and fog distance."; }
     const char* GetLink(void) const override { return ""; }
-    double GetVersion(void) const override { return 1.0; }
+    double GetVersion(void) const override { return 1.1; }
 
     uint32_t GetFlags(void) const override
     {
@@ -1627,4 +1628,9 @@ extern "C" __declspec(dllexport) double __stdcall expGetInterfaceVersion(void)
 extern "C" __declspec(dllexport) IPlugin* __stdcall expCreatePlugin(const char*)
 {
     return new VanaView();
+}
+
+extern "C" __declspec(dllexport) void __stdcall expDestroyPlugin(void* instance)
+{
+    delete static_cast<VanaView*>(instance);
 }
