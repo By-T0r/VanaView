@@ -210,7 +210,6 @@ public:
                                             selected.originalDetail, selected.detail);
             if (selected.firstUse) m_auto.finish_first_use(color.Get(), start, drawn, selected.detail != nullptr);
             if (drawn) {
-                m_auto.drawn();
                 if (selected.blended) {
                     ++m_stats.blend;
                     if (selected.detail) ++m_stats.blendDetail;

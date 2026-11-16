@@ -12,23 +12,18 @@ public:
     enum Index { Start, End, VertexMode, TableMode, RangeEnable };
     using Constant = std::array<float, 4>;
 
-    struct Writes { unsigned renderStates = 0, shaderConstants = 0; };
-
     void observe(Index index, DWORD value) { m_original[index] = value; }
 
-    Writes apply(IDirect3DDevice8* device, DWORD start, DWORD end, const Constant& shader, bool optimized)
+    void apply(IDirect3DDevice8* device, DWORD start, DWORD end, const Constant& shader)
     {
         before_apply(device);
         const DWORD desired[] = {start, end, D3DFOG_LINEAR, D3DFOG_NONE, FALSE};
-        Writes writes{};
         for (size_t i = 0; i < States.size(); ++i) {
             DWORD live = 0;
-            if (optimized && SUCCEEDED(device->GetRenderState(States[i], &live)) && live == desired[i]) continue;
-            ++writes.renderStates;
+            if (SUCCEEDED(device->GetRenderState(States[i], &live)) && live == desired[i]) continue;
             device->SetRenderState(States[i], desired[i]);
         }
-        writes.shaderConstants = apply_shader(device, shader, optimized);
-        return writes;
+        apply_shader(device, shader);
     }
 
     void restore(IDirect3DDevice8* device)
@@ -65,17 +60,16 @@ private:
         return std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
     }
 
-    unsigned apply_shader(IDirect3DDevice8* device, const Constant& value, bool optimized)
+    void apply_shader(IDirect3DDevice8* device, const Constant& value)
     {
         // The game can rewrite c9 within the same scene and shader. Read the
         // device value instead of assuming the previous write is still live.
         Constant live{};
-        if (optimized && SUCCEEDED(device->GetVertexShaderConstant(9, live.data(), 1))) {
-            if (same_constant(live, value)) return 0;
+        if (SUCCEEDED(device->GetVertexShaderConstant(9, live.data(), 1))) {
+            if (same_constant(live, value)) return;
             if (!m_appliedShader || !same_constant(live, *m_appliedShader)) m_originalShader = live;
         }
         if (SUCCEEDED(device->SetVertexShaderConstant(9, value.data(), 1))) m_appliedShader = value;
-        return 1;
     }
 
     static constexpr std::array States{D3DRS_FOGSTART, D3DRS_FOGEND, D3DRS_FOGVERTEXMODE,

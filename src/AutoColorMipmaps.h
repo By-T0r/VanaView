@@ -2,7 +2,6 @@
 
 #include "Dxt3Mipmaps.h"
 #include "MipmapDiskCache.h"
-#include "MipmapProfile.h"
 #include <atomic>
 #include <chrono>
 #include <optional>
@@ -121,16 +120,6 @@ public:
         if (m_upload && m_upload->request.detail) m_upload.reset();
         std::erase_if(m_waiting, [](const Request& request) { return request.detail; });
     }
-    void drawn() { ++m_frameWork.draws; }
-
-    MipmapFrameWork frame_work() const
-    {
-        auto work = m_frameWork;
-        work.ready = count();
-        work.pending = pending();
-        return work;
-    }
-
     void clear()
     {
         cancel_pending();
@@ -143,7 +132,6 @@ public:
         m_nextFirstUseFrame = 0;
         m_firstUseThisFrame = false;
         m_lastPresent = {};
-        m_frameWork = {};
     }
 
     void start()
@@ -206,8 +194,7 @@ public:
 
     void finish_first_use(IDirect3DBaseTexture8* original, Clock::time_point start, bool drawn, bool detailUsed)
     {
-        m_frameWork.firstDrawUs = record_peak(m_stats.firstUseUs, start);
-        if (drawn) ++m_frameWork.firstDraws;
+        record_peak(m_stats.firstUseUs, start);
         const auto it = m_cache.find(original);
         if (drawn && it != m_cache.end()) {
             it->second.used = true;
@@ -218,7 +205,6 @@ public:
     void present(IDirect3DDevice8* device)
     {
         const auto start = Clock::now();
-        m_frameWork = {};
         const bool slowFrame = m_lastPresent != Clock::time_point{} && start - m_lastPresent > std::chrono::milliseconds(22);
         m_lastPresent = start;
         ++m_frame;
@@ -234,12 +220,11 @@ public:
                 m_nextWorkFrame = m_frame + 3;
             } else {
                 ++m_stats.paced;
-                m_frameWork.paced = true;
             }
         }
         if (m_candidate && m_upload) ++m_stats.overlapFrames;
         m_firstUseThisFrame = false;
-        m_frameWork.presentUs = record_peak(m_stats.peakUs, start);
+        record_peak(m_stats.peakUs, start);
     }
 
 private:
@@ -495,7 +480,7 @@ private:
         }
         const auto start = Clock::now();
         snapshot();
-        m_frameWork.readUs = record_peak(m_stats.snapshotUs, start);
+        record_peak(m_stats.snapshotUs, start);
     }
 
     bool read_source(IDirect3DBaseTexture8* texture, const Dxt3::Layout& layout, bool& likeNormal, uint8_t* top)
@@ -614,7 +599,6 @@ private:
         if (m_upload || !m_candidate || !m_buildDone.load(std::memory_order_acquire)) return;
         m_worker.join();
         m_stats.buildUs = std::max(m_stats.buildUs, m_buildTime);
-        m_frameWork.buildUs = m_buildTime;
         m_stats.diskHits += m_diskWork.hit;
         m_stats.diskMisses += m_diskWork.miss;
         m_stats.diskWrites += m_diskWork.wrote;
@@ -646,10 +630,10 @@ private:
             bool ok;
             if (!upload.texture) {
                 ok = Dxt3::create(device, layout, upload.texture);
-                m_frameWork.createUs = record_peak(m_stats.createUs, start);
+                record_peak(m_stats.createUs, start);
             } else {
                 ok = upload_levels(upload, start);
-                m_frameWork.copyUs = record_peak(m_stats.uploadUs, start);
+                record_peak(m_stats.uploadUs, start);
             }
             if (!ok) {
                 ++m_stats.errors;
@@ -699,7 +683,6 @@ private:
     size_t m_bytes = 0, m_detailBytes = 0;
     unsigned m_attempts = 0;
     Stats m_stats;
-    MipmapFrameWork m_frameWork;
     std::unordered_map<IDirect3DBaseTexture8*, Entry> m_cache;
     std::array<Skip, 256> m_skips{};
     std::vector<Request> m_waiting;

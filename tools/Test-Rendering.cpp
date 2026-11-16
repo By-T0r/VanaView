@@ -4,10 +4,7 @@
 #include <Windows.h>
 #include <cstdint>
 #include <d3d8/includes/d3d8.h>
-#include "../src/RenderDiagnostics.h"
 #include "../src/MipmapExperiment.h"
-#include "../src/MipmapComparison.h"
-#include "../src/FogComparison.h"
 #include "../src/FogDeviceState.h"
 #include <cstdlib>
 
@@ -89,87 +86,6 @@ static void test_disk_cache(const std::filesystem::path& install)
         CHECK(std::filesystem::remove(entry.path()));
     CHECK(std::filesystem::remove(dir));
     std::puts("PASS: legacy disk reload, integrity checks, frequency eviction and size cap.");
-}
-
-static void test_mipmap_profile(const std::filesystem::path& install)
-{
-    MipmapProfile profile;
-    auto clock = MipmapProfile::Clock::time_point{std::chrono::seconds(1)};
-    profile.present(clock, 235, true, {});
-    for (size_t i = 1; i <= MipmapProfile::BaselineLimit + 2; ++i) {
-        clock += std::chrono::microseconds(17000 + i);
-        profile.present(clock, 235, true, {});
-    }
-    profile.start();
-    for (size_t i = 0; i < MipmapProfile::ActiveLimit + 1; ++i) {
-        MipmapFrameWork work{};
-        if (i == 0) {
-            work.readUs = 130;
-            work.presentUs = 180;
-            work.firstDrawUs = 41;
-            work.firstDraws = 1;
-            work.draws = 19;
-            work.ready = 2;
-            work.pending = true;
-            work.paced = true;
-        }
-        clock += std::chrono::microseconds(18000);
-        profile.present(clock, 235, false, work);
-    }
-    const auto message = profile.save(install, "unload");
-    const std::string prefix = "Mipmap profile saved: ";
-    CHECK(!profile.active() && message.starts_with(prefix));
-    std::ifstream csv(std::filesystem::path(message.substr(prefix.size())));
-    std::string row;
-    CHECK(std::getline(csv, row) && row.find("end=unload baseline=300 auto=1800 capped=1") != std::string::npos);
-    CHECK(std::getline(csv, row) && row.starts_with("mode,frame,zone,interval_us,"));
-    CHECK(std::getline(csv, row) && row.starts_with("off,1,235,17003,"));
-    for (size_t i = 1; i < MipmapProfile::BaselineLimit; ++i) CHECK(std::getline(csv, row));
-    CHECK(row.starts_with("off,300,235,17302,"));
-    CHECK(std::getline(csv, row) && row == "auto,1,235,18000,180,130,0,0,0,41,1,19,2,1,1");
-    for (size_t i = 1; i < MipmapProfile::ActiveLimit; ++i) CHECK(std::getline(csv, row));
-    CHECK(!std::getline(csv, row));
-    CHECK(profile.save(install, "off").empty());
-    std::puts("PASS: mipmap profile baseline order, active phase timings, capture bounds and final CSV.");
-}
-
-static void test_mipmap_comparison(const std::filesystem::path& install)
-{
-    MipmapComparison comparison;
-    auto clock = MipmapComparison::Clock::time_point{std::chrono::seconds(1)};
-    comparison.start(clock, true, 235, 31);
-    const bool schedule[] = {true, false, false, true};
-    for (bool paused : schedule) {
-        CHECK(!comparison.done() && comparison.paused() == paused);
-        for (size_t i = 0; i < MipmapComparison::SettleFrames + MipmapComparison::BlockFrames; ++i) {
-            MipmapFrameWork work{};
-            work.draws = paused ? 0 : 900;
-            clock += std::chrono::microseconds(i < MipmapComparison::SettleFrames ? 99000 : paused ? 16667 : 22000);
-            comparison.present(clock, work);
-        }
-    }
-    CHECK(comparison.done() && comparison.was_paused());
-    CHECK(comparison.result(true).frames == 360 && comparison.result(false).frames == 360);
-    CHECK(comparison.result(true).intervalUs == 360 * 16667 && comparison.result(false).intervalUs == 360 * 22000);
-    CHECK(comparison.result(false).draws == 360 * 900);
-    const auto message = comparison.save(install, "complete");
-    const std::string prefix = "Mipmap comparison saved: ";
-    CHECK(message.starts_with(prefix));
-    std::ifstream csv(std::filesystem::path(message.substr(prefix.size())));
-    std::string row;
-    CHECK(std::getline(csv, row) && row.find("end=complete zone=235 ready=31 rows=720") != std::string::npos);
-    CHECK(std::getline(csv, row) && row.starts_with("phase,mode,frame,"));
-    for (size_t phase = 0; phase < std::size(schedule); ++phase) {
-        const bool paused = schedule[phase];
-        for (size_t i = 0; i < MipmapComparison::BlockFrames; ++i) {
-            CHECK(std::getline(csv, row));
-            CHECK(row == std::to_string(phase + 1) + (paused ? ",paused," : ",auto,") +
-                std::to_string(phase * MipmapComparison::BlockFrames + i + 1) +
-                (paused ? ",16667,0,0,0" : ",22000,0,900,0"));
-        }
-    }
-    CHECK(!std::getline(csv, row));
-    std::puts("PASS: comparison schedule, discarded transition frames, totals and CSV.");
 }
 
 static IDirect3DTexture8* original_from_chain(IDirect3DDevice8* device, const std::filesystem::path& file)
@@ -299,8 +215,6 @@ static void test_automatic_mips(IDirect3DDevice8* device, MipmapExperiment& expe
     CHECK(experiment.set_paused(false) && !experiment.paused());
     CHECK(experiment.draw(device, D3DPT_TRIANGLELIST, 0, 1));
     CHECK(experiment.stats().color == 1 && experiment.stats().detail == 0);
-    const auto measured = experiment.automatic().frame_work();
-    CHECK(measured.ready == 2 && measured.draws == 1 && measured.firstDraws == 1);
     IDirect3DBaseTexture8* current = nullptr;
     CHECK(SUCCEEDED(device->GetTexture(0, &current)) && current == color); current->Release();
     CHECK(SUCCEEDED(device->GetTexture(1, &current)) && current == detail); current->Release();
@@ -499,6 +413,7 @@ static void test_mipmaps(IDirect3DDevice8* device, const std::filesystem::path& 
     auto* detail = original_from_chain(device, folder / "pavement-a-detail.dds");
     CHECK(SUCCEEDED(device->SetTexture(0, color)));
     CHECK(SUCCEEDED(device->SetTexture(1, detail)));
+    CHECK(SUCCEEDED(device->SetTextureStageState(0, D3DTSS_MIPFILTER, D3DTEXF_LINEAR)));
     CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ZWRITEENABLE, TRUE)));
     // ps_1_1: mov r0, c0
     const DWORD bytecode[] = {0xffff0101, 1, 0x800f0000, 0xa0e40000, 0xffff};
@@ -552,48 +467,6 @@ static void test_mipmaps(IDirect3DDevice8* device, const std::filesystem::path& 
     std::puts("PASS: DDS upload, color/pair draws, cache reuse, binding restoration, invalidation, off.");
 }
 
-static void test_fog_comparison(const std::filesystem::path& install)
-{
-    FogComparison comparison;
-    const FogComparison::Settings settings{107, 1, 2, 4.646f, 1.0f};
-    auto now = FogComparison::Clock::time_point{std::chrono::seconds(1)};
-    comparison.start(now, settings);
-    CHECK(comparison.matches(settings) && !comparison.matches({235, 1, 2, 4.646f, 1.0f}));
-    CHECK(!comparison.expired(now) && comparison.expired(now + FogComparison::Timeout));
-    const bool schedule[] = {false, true, true, false};
-    for (bool optimized : schedule) {
-        CHECK(!comparison.done() && comparison.optimized() == optimized);
-        for (size_t i = 0; i < FogComparison::SettleFrames + FogComparison::BlockFrames; ++i) {
-            const bool settling = i < FogComparison::SettleFrames;
-            comparison.draw(settling ? 999 : 20, optimized ? FogDeviceState::Writes{0, 1} : FogDeviceState::Writes{5, 1});
-            comparison.draw(6, optimized ? FogDeviceState::Writes{} : FogDeviceState::Writes{5, 1});
-            now += std::chrono::microseconds(settling ? 100000 : optimized ? 16000 : 25000);
-            comparison.present(now);
-        }
-    }
-    CHECK(comparison.done() && comparison.optimized());
-    CHECK(comparison.result(false).frames == 240 && comparison.result(true).frames == 240);
-    CHECK(comparison.result(false).writes_per_frame() == 12 && comparison.result(true).writes_per_frame() == 1);
-    CHECK(comparison.result(false).fps() == 40.0 && comparison.low_fps(true) == 62.5);
-    comparison.reset();
-    CHECK(!comparison.active() && comparison.optimized());
-    const std::string prefix = "Fog comparison saved: ";
-    const auto message = comparison.save(install, "complete");
-    CHECK(message.starts_with(prefix));
-    std::ifstream csv(std::filesystem::path(message.substr(prefix.size())));
-    std::string row;
-    CHECK(std::getline(csv, row) && row.find("schema=2 end=complete zone=107") != std::string::npos);
-    CHECK(std::getline(csv, row) && row.ends_with("render_state_writes,shader_constant_writes"));
-    for (size_t i = 0; i < 4 * FogComparison::BlockFrames; ++i) {
-        const size_t block = i / FogComparison::BlockFrames;
-        CHECK(std::getline(csv, row));
-        CHECK(row == std::to_string(block + 1) + (schedule[block] ? ",optimized," : ",legacy,") +
-              std::to_string(i + 1) + (schedule[block] ? ",16000,2,26,0,1" : ",25000,2,26,10,2"));
-    }
-    CHECK(!std::getline(csv, row));
-    std::puts("PASS: fog A/B phases, discarded transition frames, timings, counters and CSV.");
-}
-
 static void test_fog_state(IDirect3DDevice8* device)
 {
     FogDeviceState fog;
@@ -606,10 +479,8 @@ static void test_fog_state(IDirect3DDevice8* device)
     for (size_t i = 0; i < std::size(states); ++i)
         CHECK(SUCCEEDED(device->SetRenderState(states[i], defaults[i])));
     CHECK(SUCCEEDED(device->SetVertexShaderConstant(9, original.data(), 1)));
-    auto writes = fog.apply(device, 0x42200000, 0x43340000, forced, false);
-    CHECK(writes.renderStates == 5 && writes.shaderConstants == 1);
-    writes = fog.apply(device, 0x42200000, 0x43340000, forced, true);
-    CHECK(writes.renderStates == 0 && writes.shaderConstants == 0);
+    fog.apply(device, 0x42200000, 0x43340000, forced);
+    fog.apply(device, 0x42200000, 0x43340000, forced);
 
     // State blocks and shader constant writes can bypass Ashita's render-state callback.
     DWORD stateBlock = 0;
@@ -619,15 +490,13 @@ static void test_fog_state(IDirect3DDevice8* device)
     CHECK(SUCCEEDED(device->ApplyStateBlock(stateBlock)));
     CHECK(SUCCEEDED(device->DeleteStateBlock(stateBlock)));
     CHECK(SUCCEEDED(device->SetVertexShaderConstant(9, later.data(), 1)));
-    writes = fog.apply(device, 0x42200000, 0x43340000, forced, true);
-    CHECK(writes.renderStates == 1 && writes.shaderConstants == 1);
+    fog.apply(device, 0x42200000, 0x43340000, forced);
     DWORD vertexFog = 0;
     CHECK(SUCCEEDED(device->GetRenderState(D3DRS_FOGVERTEXMODE, &vertexFog)) && vertexFog == D3DFOG_LINEAR);
     FogDeviceState::Constant live{};
     CHECK(SUCCEEDED(device->GetVertexShaderConstant(9, live.data(), 1)) && live == forced);
 
-    writes = fog.apply(device, 0x42200000, 0x43480000, forced, true);
-    CHECK(writes.renderStates == 1 && writes.shaderConstants == 0);
+    fog.apply(device, 0x42200000, 0x43480000, forced);
     fog.observe(FogDeviceState::TableMode, D3DFOG_EXP2);
     fog.restore(device);
     for (size_t i = 0; i < std::size(states); ++i) {
@@ -636,7 +505,7 @@ static void test_fog_state(IDirect3DDevice8* device)
         CHECK(actual == (states[i] == D3DRS_FOGTABLEMODE ? DWORD(D3DFOG_EXP2) : defaults[i]));
     }
     CHECK(SUCCEEDED(device->GetVertexShaderConstant(9, live.data(), 1)) && live == later);
-    fog.apply(device, 0x42200000, 0x43340000, forced, true);
+    fog.apply(device, 0x42200000, 0x43340000, forced);
     CHECK(SUCCEEDED(device->SetVertexShaderConstant(9, original.data(), 1)));
     fog.restore(device);
     CHECK(SUCCEEDED(device->GetVertexShaderConstant(9, live.data(), 1)) && live == original);
@@ -648,9 +517,6 @@ int main(int argc, char** argv)
     CHECK(argc >= 2 && argc <= 4);
     test_bc2_generation();
     test_disk_cache(argv[1]);
-    test_mipmap_profile(argv[1]);
-    test_mipmap_comparison(argv[1]);
-    test_fog_comparison(argv[1]);
     char system[MAX_PATH]{};
     CHECK(GetSystemDirectoryA(system, MAX_PATH));
     const std::string dll = std::string(system) + "\\d3d8.dll";
@@ -658,7 +524,7 @@ int main(int argc, char** argv)
     auto create = reinterpret_cast<IDirect3D8* (WINAPI*)(UINT)>(GetProcAddress(module, "Direct3DCreate8"));
     CHECK(create);
     IDirect3D8* d3d = create(D3D_SDK_VERSION); CHECK(d3d);
-    HWND window = CreateWindowExA(0, "STATIC", "VanaView diagnostic test", WS_POPUP,
+    HWND window = CreateWindowExA(0, "STATIC", "VanaView rendering test", WS_POPUP,
         0, 0, 64, 64, nullptr, nullptr, GetModuleHandleA(nullptr), nullptr); CHECK(window);
     D3DPRESENT_PARAMETERS pp{};
     pp.Windowed = TRUE; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.hDeviceWindow = window;
@@ -670,86 +536,8 @@ int main(int argc, char** argv)
     HRESULT hr = d3d->CreateDevice(0, D3DDEVTYPE_HAL, window, D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &device);
     std::printf("CreateDevice HRESULT: %08lX\n", hr); CHECK(SUCCEEDED(hr));
     test_fog_state(device);
-    IDirect3DTexture8* mip = nullptr; IDirect3DTexture8* single = nullptr;
-    CHECK(SUCCEEDED(device->CreateTexture(64, 64, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &mip)));
-    CHECK(SUCCEEDED(device->CreateTexture(32, 16, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &single)));
-    CHECK(mip->GetLevelCount() == 7);
-    CHECK(SUCCEEDED(device->SetTexture(0, mip)));
-    CHECK(SUCCEEDED(device->SetTexture(1, single)));
-    CHECK(SUCCEEDED(device->SetTextureStageState(0, D3DTSS_MIPFILTER, D3DTEXF_LINEAR)));
-
-    RenderDiagnostics capture;
-    std::string message;
-    capture.draw(device, 0, D3DPT_TRIANGLELIST, 1); CHECK(capture.size() == 0);
-    capture.start(argv[1], 235, 1, 2, 4.646f);
-    capture.draw(device, 0, D3DPT_TRIANGLELIST, 1); CHECK(capture.size() == 0);
-    CHECK(!capture.present(message)); // Arm -> first full frame.
-    for (unsigned i = 0; i < 1026; ++i) capture.draw(device, 1, D3DPT_TRIANGLELIST, 2);
-    CHECK(capture.size() == 1024);
-    CHECK(!capture.present(message));
-    IDirect3DSurface8* originalTarget = nullptr; IDirect3DSurface8* originalDepth = nullptr;
-    IDirect3DSurface8* offscreen = nullptr;
-    CHECK(SUCCEEDED(device->GetRenderTarget(&originalTarget)));
-    CHECK(SUCCEEDED(device->GetDepthStencilSurface(&originalDepth)));
-    CHECK(SUCCEEDED(device->CreateRenderTarget(32, 32, mode.Format, D3DMULTISAMPLE_NONE, FALSE, &offscreen)));
-    CHECK(SUCCEEDED(device->SetRenderTarget(offscreen, nullptr)));
-    capture.draw(device, 2, D3DPT_TRIANGLESTRIP, 3, false);
-    IDirect3DSurface8* afterTarget = nullptr;
-    CHECK(SUCCEEDED(device->GetRenderTarget(&afterTarget)) && afterTarget == offscreen);
-    afterTarget->Release();
-    CHECK(SUCCEEDED(device->SetRenderTarget(originalTarget, originalDepth)));
-    originalTarget->Release(); originalDepth->Release(); CHECK(offscreen->Release() == 0);
-    CHECK(!capture.present(message));
-    capture.draw(device, 3, D3DPT_TRIANGLEFAN, 4);
-    CHECK(capture.present(message));
-    CHECK(!capture.active() && capture.size() == 0);
-    CHECK(message.find("Diagnostic saved: ") == 0);
-    std::puts(message.c_str());
-    DWORD filter = 0;
-    CHECK(SUCCEEDED(device->GetTextureStageState(0, D3DTSS_MIPFILTER, &filter)) && filter == D3DTEXF_LINEAR);
-    IDirect3DBaseTexture8* after = nullptr;
-    CHECK(SUCCEEDED(device->GetTexture(0, &after)) && after == mip); after->Release();
-    capture.start(argv[1], 235, 1, 2, 4.646f);
-    capture.cancel(); CHECK(!capture.active() && !capture.present(message));
-    capture.start(argv[1], 235, 1, 2, 4.646f);
-    for (unsigned i = 0; i < 3; ++i) CHECK(!capture.present(message));
-    CHECK(capture.present(message) && message.find("no draw callbacks") != std::string::npos);
-    IDirect3DTexture8* compressed[3]{};
-    const D3DFORMAT formats[] = { D3DFMT_DXT1, D3DFMT_DXT3, D3DFMT_DXT5 };
-    for (unsigned i = 0; i < 3; ++i) {
-        CHECK(SUCCEEDED(device->CreateTexture(32, 16, 1, 0, formats[i], D3DPOOL_MANAGED, &compressed[i])));
-        D3DLOCKED_RECT lock{}; CHECK(SUCCEEDED(compressed[i]->LockRect(0, &lock, nullptr, 0)));
-        const unsigned blockBytes = i == 0 ? 8 : 16;
-        for (unsigned y = 0; y < 4; ++y) for (unsigned x = 0; x < 8; ++x) {
-            auto* block = static_cast<uint8_t*>(lock.pBits) + y * lock.Pitch + x * blockBytes;
-            std::memset(block, 0, blockBytes);
-            if (i == 1) std::memset(block, 255, 8); // DXT3 opaque alpha
-            if (i == 2) block[0] = 255; // DXT5 opaque alpha, all indices 0
-            block[blockBytes - 7] = 0xF8; // RGB565 red endpoint, all color indices 0
-        }
-        CHECK(SUCCEEDED(compressed[i]->UnlockRect(0)));
-        CHECK(SUCCEEDED(device->SetTexture(i + 2, compressed[i])));
-    }
     CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE)));
-    capture.start(argv[1], 235, 1, 2, 4.646f, true);
-    CHECK(!capture.present(message));
-    for (unsigned frame = 0; frame < 3; ++frame) {
-        capture.draw(device, 0, D3DPT_TRIANGLELIST, 1);
-        const bool done = capture.present(message);
-        CHECK(done == (frame == 2));
-    }
-    CHECK(message.find("Textures: 3/3 saved") != std::string::npos);
-    std::puts(message.c_str());
-    for (unsigned i = 0; i < 3; ++i) {
-        D3DLOCKED_RECT lock{}; CHECK(SUCCEEDED(compressed[i]->LockRect(0, &lock, nullptr, D3DLOCK_READONLY)));
-        CHECK(static_cast<uint8_t*>(lock.pBits)[i == 0 ? 1 : 9] == 0xF8);
-        CHECK(SUCCEEDED(compressed[i]->UnlockRect(0)));
-        device->SetTexture(i + 2, nullptr); CHECK(compressed[i]->Release() == 0);
-    }
-    device->SetTexture(0, nullptr); device->SetTexture(1, nullptr);
-    // No references retained by capture (the two GetTexture references were released).
-    CHECK(mip->Release() == 0); CHECK(single->Release() == 0);
     if (argc == 4) test_mipmaps(device, argv[3], argv[1]);
     device->Release(); d3d->Release(); DestroyWindow(window); FreeLibrary(module);
-    std::puts("PASS: inactive, arm, capture limits, completion, cancel, empty capture, state preservation, COM cleanup.");
+    std::puts("PASS: Direct3D regression tests.");
 }

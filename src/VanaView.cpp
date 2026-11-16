@@ -2,10 +2,7 @@
 #define NOMINMAX
 
 #include "Ashita.h"
-#include "RenderDiagnostics.h"
 #include "MipmapExperiment.h"
-#include "MipmapComparison.h"
-#include "FogComparison.h"
 #include "FogDeviceState.h"
 
 #include <algorithm>
@@ -129,49 +126,6 @@ namespace
         {
             return false;
         }
-    }
-
-    void write_lod_window(FILE* file, uintptr_t base, uint32_t imageSize, uint32_t center)
-    {
-        const uint32_t start = center >= 40 ? center - 40 : 0;
-        const uint32_t end = std::min(imageSize, center + 112);
-        std::fprintf(file, "%08X (%08X):", center, start);
-        for (uint32_t offset = start; offset < end; ++offset) {
-            uint8_t byte = 0;
-            if (safe_read(base + offset, byte)) std::fprintf(file, " %02X", static_cast<unsigned>(byte));
-            else std::fputs(" ??", file);
-        }
-        std::fputc('\n', file);
-    }
-
-    void write_lod_candidates(FILE* file, uintptr_t base, uint32_t imageSize)
-    {
-        // Locate the two consecutive x87 map-distance comparisons around
-        // offsets C8 and CC, allowing different stacks and object registers.
-        static constexpr unsigned MaxCandidates = 128;
-        unsigned found = 0;
-        const uintptr_t limit = base + imageSize;
-        for (uintptr_t pc = base; pc < limit && found < MaxCandidates;) {
-            MEMORY_BASIC_INFORMATION page{};
-            if (!VirtualQuery(reinterpret_cast<const void*>(pc), &page, sizeof(page))) break;
-            const uintptr_t end = std::min<uintptr_t>(limit, reinterpret_cast<uintptr_t>(page.BaseAddress) + page.RegionSize);
-            const DWORD protect = page.Protect & 0xFF;
-            const bool executable = protect == PAGE_EXECUTE_READ || protect == PAGE_EXECUTE_READWRITE ||
-                protect == PAGE_EXECUTE_WRITECOPY;
-            if (page.State == MEM_COMMIT && executable && !(page.Protect & PAGE_GUARD)) {
-                for (uintptr_t at = pc; at + 6 <= end && found < MaxCandidates; ++at) {
-                    std::array<uint8_t, 6> bytes{};
-                    if (*reinterpret_cast<const uint8_t*>(at) != 0xD8 || !safe_read(at, bytes)) continue;
-                    if ((bytes[1] & 0xF8) != 0x98 || (bytes[2] != 0xC8 && bytes[2] != 0xCC) ||
-                        bytes[3] || bytes[4] || bytes[5]) continue;
-                    write_lod_window(file, base, imageSize, static_cast<uint32_t>(at - base));
-                    ++found;
-                }
-            }
-            if (end <= pc) break;
-            pc = end;
-        }
-        std::fprintf(file, "candidate_count=%u limit=%u\n", found, MaxCandidates);
     }
 
     bool write_bytes_patch(BytesPatchSite& site, const uintptr_t address, const uint8_t* patch, const uint32_t length)
@@ -460,11 +414,7 @@ public:
 
     void Release(void) override
     {
-        finish_fog_comparison("unload");
-        finish_mip_comparison("unload");
-        save_mip_profile("unload");
         m_mipmaps.stop();
-        m_diagnostics.cancel();
         save_config(false);
         m_gameFogSampling = false;
         restore_draw_distances();
@@ -476,13 +426,7 @@ public:
 
     bool Direct3DInitialize(IDirect3DDevice8* device) override
     {
-        finish_fog_comparison("device_init");
-        finish_mip_comparison("device_init");
-        save_mip_profile("device_init");
-        m_mipProfile.reset();
         m_mipmaps.stop();
-        m_diagnostics.cancel();
-        m_diagBackBuffer = false;
         m_fogDeviceState = {};
         m_device = device;
         m_mipStartupPending = true;
@@ -534,7 +478,6 @@ public:
             else if (iequals(action, "on")) m_mipCommand.store(MipCommand::On);
             else if (iequals(action, "pause")) m_mipCommand.store(MipCommand::Pause);
             else if (iequals(action, "resume")) m_mipCommand.store(MipCommand::Resume);
-            else if (iequals(action, "compare")) m_mipCommand.store(MipCommand::Compare);
             else if (iequals(action, "smooth")) m_mipCommand.store(MipCommand::Smooth);
             else if (iequals(action, "blend")) m_mipCommand.store(MipCommand::Blend);
             else if (iequals(action, "linear")) m_mipCommand.store(MipCommand::Linear);
@@ -545,33 +488,7 @@ public:
                 else chat("Usage: /vv mip detail [on|off]");
             }
             else if (iequals(action, "off")) m_mipCommand.store(MipCommand::Off);
-            else chat("Usage: /vv mip [on|off|status|auto|pause|resume|compare|detail|smooth|blend|linear|color|pair]");
-            return true;
-        }
-
-        if (iequals(sub, "diag"))
-        {
-            const char* action = strtok_s(nullptr, " \t", &context);
-            const bool terrain = action && iequals(action, "terrain");
-            if (action == nullptr || iequals(action, "start") || iequals(action, "textures") || terrain)
-            {
-                if (m_diagnostics.active()) chat("Diagnostic already active. Use /vv diag cancel.");
-                else if (!m_device || !m_core || !m_core->GetInstallPath()) chat("Diagnostic unavailable: no D3D device or install path.");
-                else
-                {
-                    try {
-                        if (terrain) save_lod_diagnostic();
-                        m_diagnostics.start(m_core->GetInstallPath(), m_currentZoneId,
-                            static_cast<unsigned>(m_lodMode), static_cast<unsigned>(m_fogMode), m_drawDistance,
-                            terrain || (action && iequals(action, "textures")));
-                        chat("Diagnostic armed: next 3 frames, up to 1024 draws/frame. Output: logs/VanaView-diag-*.csv");
-                    } catch (...) { m_diagnostics.cancel(); chat("Diagnostic failed: could not allocate capture buffer."); }
-                }
-            }
-            else if (iequals(action, "cancel")) { m_diagnostics.cancel(); chat("Diagnostic cancelled."); }
-            else if (iequals(action, "status"))
-                chat("Diagnostic: %s, %u draws buffered.", m_diagnostics.active() ? "active" : "idle", static_cast<unsigned>(m_diagnostics.size()));
-            else chat("Usage: /vv diag [start|textures|terrain|status|cancel]");
+            else chat("Usage: /vv mip [on|off|status|auto|pause|resume|detail|smooth|blend|linear|color|pair]");
             return true;
         }
 
@@ -691,17 +608,11 @@ public:
         if (iequals(sub, "fog"))
         {
             const char* mode = strtok_s(nullptr, " \t", &context);
-            if (mode && iequals(mode, "compare"))
-            {
-                m_fogCompareRequested.store(true);
-                return true;
-            }
             if (mode == nullptr || iequals(mode, "status"))
             {
                 print_fog_status();
                 return true;
             }
-            finish_fog_comparison("fog_changed");
             if (iequals(mode, "default"))
             {
                 set_fog_mode(FogMode::DistanceLinked);
@@ -749,7 +660,7 @@ public:
                 chat("Fog range set to %.1f-%.1f.", static_cast<double>(m_fogStart), static_cast<double>(m_fogEnd));
                 return true;
             }
-            chat("Usage: /vv fog <start> <end> | custom | game | distance | default | compare");
+            chat("Usage: /vv fog <start> <end> | custom | game | distance | default");
             return true;
         }
 
@@ -759,13 +670,11 @@ public:
 
     void Direct3DBeginScene(bool isRenderingBackBuffer) override
     {
-        m_diagBackBuffer = isRenderingBackBuffer;
         begin_game_fog_sample(isRenderingBackBuffer);
     }
 
     void Direct3DEndScene(bool isRenderingBackBuffer) override
     {
-        m_diagBackBuffer = false;
         if (isRenderingBackBuffer)
             finish_game_fog_sample();
     }
@@ -777,33 +686,14 @@ public:
         UNREFERENCED_PARAMETER(hDestWindowOverride);
         UNREFERENCED_PARAMETER(pDirtyRegion);
 
-        const auto now = MipmapProfile::Clock::now();
-        const auto mode = m_mipmaps.mode();
-        if (m_mipProfile.active() && mode != MipmapExperiment::Mode::Auto)
-            save_mip_profile("draw_failure");
-        m_mipProfile.present(now, m_currentZoneId,
-            mode == MipmapExperiment::Mode::Off, m_mipmaps.automatic().frame_work());
-
-        if (m_diagnostics.active()) {
-            finish_mip_comparison("diagnostic");
-            finish_fog_comparison("diagnostic");
-        }
-        try {
-            std::string message;
-            if (m_diagnostics.present(message)) chat("%s", message.c_str());
-        } catch (...) { m_diagnostics.cancel(); chat("Diagnostic failed while saving capture."); }
         update_zone_profile();
-        update_mip_comparison(now);
         try {
             m_mipmaps.present(m_device);
         } catch (...) {
-            finish_mip_comparison("cache_failure");
-            save_mip_profile("cache_failure");
             m_mipmaps.stop();
             chat("Automatic mipmaps stopped: could not prepare the texture cache.");
         }
         process_mip_command();
-        if (m_fogComparison.active() || m_fogCompareRequested.load()) update_fog_comparison(now);
         render_window();
     }
 
@@ -851,9 +741,8 @@ public:
 
     bool Direct3DDrawPrimitive(D3DPRIMITIVETYPE primitiveType, UINT startVertex, UINT primitiveCount) override
     {
-        apply_fog_state_before_draw(primitiveCount);
-        m_diagnostics.draw(m_device, 0, primitiveType, primitiveCount, m_diagBackBuffer);
-        return !m_diagnostics.active() && m_mipmaps.draw(m_device, primitiveType, startVertex, primitiveCount);
+        apply_fog_state_before_draw();
+        return m_mipmaps.draw(m_device, primitiveType, startVertex, primitiveCount);
     }
 
     bool Direct3DDrawIndexedPrimitive(D3DPRIMITIVETYPE primitiveType, UINT minIndex, UINT numVertices, UINT startIndex, UINT primCount) override
@@ -864,8 +753,7 @@ public:
         UNREFERENCED_PARAMETER(startIndex);
         UNREFERENCED_PARAMETER(primCount);
 
-        apply_fog_state_before_draw(primCount);
-        m_diagnostics.draw(m_device, 1, primitiveType, primCount, m_diagBackBuffer);
+        apply_fog_state_before_draw();
         return false;
     }
 
@@ -876,8 +764,7 @@ public:
         UNREFERENCED_PARAMETER(vertexStreamZeroData);
         UNREFERENCED_PARAMETER(vertexStreamZeroStride);
 
-        apply_fog_state_before_draw(primitiveCount);
-        m_diagnostics.draw(m_device, 2, primitiveType, primitiveCount, m_diagBackBuffer);
+        apply_fog_state_before_draw();
         return false;
     }
 
@@ -892,173 +779,15 @@ public:
         UNREFERENCED_PARAMETER(vertexStreamZeroData);
         UNREFERENCED_PARAMETER(vertexStreamZeroStride);
 
-        apply_fog_state_before_draw(primitiveCount);
-        m_diagnostics.draw(m_device, 3, primitiveType, primitiveCount, m_diagBackBuffer);
+        apply_fog_state_before_draw();
         return false;
     }
 
 private:
     enum class MipCommand
     {
-        None, Color, Pair, Auto, On, Off, Status, Pause, Resume, Compare, DetailOn, DetailOff, Smooth, Blend, Linear
+        None, Color, Pair, Auto, On, Off, Status, Pause, Resume, DetailOn, DetailOff, Smooth, Blend, Linear
     };
-
-    FogComparison::Settings fog_comparison_settings() const
-    {
-        return {m_currentZoneId, static_cast<unsigned>(m_lodMode), static_cast<unsigned>(m_fogMode),
-            m_drawDistance, m_lodRangeScale};
-    }
-
-    void finish_fog_comparison(const char* reason)
-    {
-        if (!m_fogComparison.active()) return;
-        m_fogComparison.reset();
-        if (m_fogComparePausedMips) {
-            m_mipmaps.set_paused(false);
-            m_fogComparePausedMips = false;
-        }
-        if (m_fogComparison.done()) {
-            const auto& legacy = m_fogComparison.result(false);
-            const auto& optimized = m_fogComparison.result(true);
-            chat("Fog A/B | legacy %.1f FPS (1%% low %.1f) | optimized %.1f FPS (1%% low %.1f)",
-                legacy.fps(), m_fogComparison.low_fps(false), optimized.fps(), m_fogComparison.low_fps(true));
-            chat("Fog A/B | writes/frame %.0f legacy, %.0f optimized",
-                legacy.writes_per_frame(), optimized.writes_per_frame());
-        } else {
-            chat("Fog comparison stopped (%s).", reason);
-        }
-        try {
-            const auto* path = m_core ? m_core->GetInstallPath() : nullptr;
-            if (path) {
-                const auto message = m_fogComparison.save(path, reason);
-                if (!message.empty()) chat("%s", message.c_str());
-            }
-        } catch (...) {
-            chat("Fog comparison could not be saved.");
-        }
-    }
-
-    void update_fog_comparison(FogComparison::Clock::time_point now)
-    {
-        const bool requested = m_fogCompareRequested.exchange(false);
-        if (m_fogComparison.active()) {
-            if (requested) { finish_fog_comparison("manual"); return; }
-            if (!m_fogComparison.matches(fog_comparison_settings()) || m_windowOpen) {
-                finish_fog_comparison("settings_changed");
-                return;
-            }
-            if (m_fogComparison.expired(now)) { finish_fog_comparison("timeout"); return; }
-            m_fogComparison.present(now);
-            if (m_fogComparison.done()) finish_fog_comparison("complete");
-            return;
-        }
-        if (!requested) return;
-        if (!m_device || !m_core || !m_core->GetInstallPath() || !m_currentZoneId || !should_force_fog_state()) {
-            chat("Fog comparison requires a loaded zone and Game or Custom fog.");
-            return;
-        }
-        if (m_diagnostics.active() || m_mipComparison.active() || m_windowOpen ||
-            m_mipmaps.mode() == MipmapExperiment::Mode::Color || m_mipmaps.mode() == MipmapExperiment::Mode::Pair) {
-            chat("Close the VanaView window and stop other render tests before comparing fog.");
-            return;
-        }
-        if (m_mipmaps.mode() == MipmapExperiment::Mode::Auto && !m_mipmaps.paused())
-            m_fogComparePausedMips = m_mipmaps.set_paused(true);
-        m_fogComparison.start(now, fog_comparison_settings());
-        chat("Fog comparison started (legacy vs optimized). Keep the same view until results appear.");
-    }
-
-    void finish_mip_comparison(const char* reason)
-    {
-        if (!m_mipComparison.active()) return;
-        m_mipmaps.set_cache_only(false);
-        m_mipmaps.set_paused(m_mipComparison.was_paused());
-        if (m_mipComparison.done()) {
-            const auto& reference = m_mipComparison.result(true);
-            const auto& active = m_mipComparison.result(false);
-            chat("Mips A/B | paused %.1f fps | auto %.1f fps | substituted draws=%llu",
-                 reference.fps(), active.fps(), active.draws);
-            if (!active.draws) chat("No substitutions in this view. Compare again where the mipmaps are visible.");
-        }
-        try {
-            const auto* path = m_core ? m_core->GetInstallPath() : nullptr;
-            if (path) {
-                const auto message = m_mipComparison.save(path, reason);
-                if (!message.empty()) chat("%s", message.c_str());
-            }
-        } catch (...) {
-            chat("Mipmap comparison could not be saved.");
-        }
-        m_mipComparison.reset();
-    }
-
-    void update_mip_comparison(MipmapProfile::Clock::time_point now)
-    {
-        if (!m_mipComparison.active()) return;
-        if (m_mipmaps.mode() != MipmapExperiment::Mode::Auto ||
-            m_mipmaps.automatic().count() != m_mipComparison.ready()) {
-            finish_mip_comparison("cache_changed");
-            return;
-        }
-        m_mipComparison.present(now, m_mipmaps.automatic().frame_work());
-        if (m_mipComparison.done()) finish_mip_comparison("complete");
-        else m_mipmaps.set_paused(m_mipComparison.paused());
-    }
-
-    void start_mip_comparison()
-    {
-        if (m_mipComparison.active()) {
-            chat("Mipmap comparison already running.");
-            return;
-        }
-        const auto& cache = m_mipmaps.automatic();
-        if (m_mipmaps.mode() != MipmapExperiment::Mode::Auto || cache.count() == 0 || cache.pending()) {
-            chat("Enable /vv mip auto and wait for ready > 0 and pending = 0.");
-            return;
-        }
-        if (m_diagnostics.active()) {
-            chat("Wait for the render diagnostic to finish.");
-            return;
-        }
-        if (m_mipmaps.detail_enabled()) {
-            chat("Use /vv mip detail off for the paused versus color comparison.");
-            return;
-        }
-        if (m_mipmaps.smoothing()) {
-            chat("Toggle /vv mip smooth off for the paused versus color comparison.");
-            return;
-        }
-        if (m_mipmaps.blend_enabled()) {
-            chat("Toggle /vv mip blend off for the paused versus color comparison.");
-            return;
-        }
-        if (m_mipmaps.linear_enabled()) {
-            chat("Toggle /vv mip linear off for the paused versus color comparison.");
-            return;
-        }
-        save_mip_profile("compare");
-        m_mipmaps.set_cache_only(true);
-        m_mipComparison.start(MipmapProfile::Clock::now(), m_mipmaps.paused(), m_currentZoneId, cache.count());
-        m_mipmaps.set_paused(true);
-        chat("Mipmap comparison started. Keep the camera still until Mips A/B appears.");
-    }
-
-    void save_mip_profile(const char* reason)
-    {
-        if (!m_mipProfile.active()) return;
-        try {
-            const auto* path = m_core ? m_core->GetInstallPath() : nullptr;
-            if (!path) {
-                m_mipProfile.reset();
-                return;
-            }
-            const auto message = m_mipProfile.save(path, reason);
-            if (!message.empty()) chat("%s", message.c_str());
-        } catch (...) {
-            m_mipProfile.reset();
-            chat("Mipmap profile could not be saved.");
-        }
-    }
 
     void start_ground_mipmaps()
     {
@@ -1082,8 +811,6 @@ private:
     void process_mip_command()
     {
         const auto command = m_mipCommand.exchange(MipCommand::None);
-        if (command != MipCommand::None && command != MipCommand::Status)
-            finish_fog_comparison("mipmap_changed");
         if (m_device && std::exchange(m_mipStartupPending, false) && m_mipEnabled &&
             command != MipCommand::On && command != MipCommand::Off && command != MipCommand::Auto &&
             command != MipCommand::Color && command != MipCommand::Pair) {
@@ -1091,8 +818,6 @@ private:
         }
         if (command == MipCommand::None) return;
         if (command == MipCommand::On) {
-            finish_mip_comparison("ground_mips_on");
-            save_mip_profile("ground_mips_on");
             save_mip_preference(true);
             if (m_device) start_ground_mipmaps();
             else m_mipStartupPending = true;
@@ -1102,9 +827,6 @@ private:
             const bool smooth = command == MipCommand::Smooth;
             const bool linear = command == MipCommand::Linear;
             const char* name = linear ? "linear" : smooth ? "smooth" : "blend";
-            const char* reason = linear ? "linear_mode" : smooth ? "smooth_mode" : "blend_mode";
-            finish_mip_comparison(reason);
-            save_mip_profile(reason);
             if (m_mipmaps.mode() == MipmapExperiment::Mode::Off && m_device) {
                 try {
                     std::string message;
@@ -1141,40 +863,27 @@ private:
             }
             return;
         }
-        if (command == MipCommand::Compare) {
-            start_mip_comparison();
-            return;
-        }
         if (command == MipCommand::DetailOn || command == MipCommand::DetailOff) {
-            finish_mip_comparison("detail_mode");
             if (!m_mipmaps.set_detail(command == MipCommand::DetailOn)) {
                 chat("Enable /vv mip auto first.");
                 return;
             }
-            save_mip_profile("detail_mode");
         }
         if (command == MipCommand::Pause || command == MipCommand::Resume) {
-            finish_mip_comparison("manual");
             if (!m_mipmaps.set_paused(command == MipCommand::Pause)) {
                 chat("Enable /vv mip auto first.");
                 return;
             }
-            if (command == MipCommand::Pause) save_mip_profile("pause");
         }
         if (command == MipCommand::Off) {
-            finish_mip_comparison("off");
-            save_mip_profile("off");
             m_mipmaps.stop();
             save_mip_preference(false);
         }
         if (command == MipCommand::Color || command == MipCommand::Pair || command == MipCommand::Auto) {
             try {
                 std::string message;
-                finish_mip_comparison("switch_mode");
-                save_mip_profile("switch_mode");
                 if (command == MipCommand::Auto && m_device) {
-                    if (m_mipmaps.start(m_device, {}, MipmapExperiment::Mode::Auto, message))
-                        m_mipProfile.start();
+                    m_mipmaps.start(m_device, {}, MipmapExperiment::Mode::Auto, message);
                 } else if (m_device && m_core && m_core->GetInstallPath()) {
                     const auto mode = command == MipCommand::Color ? MipmapExperiment::Mode::Color : MipmapExperiment::Mode::Pair;
                     const auto directory = std::filesystem::path(m_core->GetInstallPath()) / "plugins" / "VanaView-mips";
@@ -1240,13 +949,11 @@ private:
         chat("/vv distance <1-100> | default");
         chat("/vv lod <scale> | full | default");
         chat("/vv fog <start> <end> | custom | game | distance | default");
-        chat("/vv fog compare - compare legacy and optimized fog writes");
         chat("/vv zone on | off | status");
         chat("/vv reset");
         chat("/vv status");
-        chat("/vv diag [start|textures|terrain|status|cancel] - capture 3 frames of texture diagnostics");
         chat("/vv mip [on|off|status] - ground mipmaps and startup preference");
-        chat("/vv mip [auto|pause|resume|compare|color|pair] - mipmap testing");
+        chat("/vv mip [auto|pause|resume|color|pair] - mipmap testing");
         chat("/vv mip detail [on|off] - compare color and detail within auto");
         chat("/vv mip smooth - toggle coarser color mips for flicker comparison");
         chat("/vv mip blend - toggle mipmap reuse in the terrain blend pass");
@@ -1889,26 +1596,23 @@ private:
             finish_game_fog_sample();
     }
 
-    void apply_fog_state_before_draw(unsigned primitives)
+    void apply_fog_state_before_draw()
     {
         finish_game_fog_sample();
-        const auto writes = apply_forced_fog_state();
-        m_fogComparison.draw(primitives, writes);
+        apply_forced_fog_state();
     }
 
-    FogDeviceState::Writes apply_forced_fog_state()
+    void apply_forced_fog_state()
     {
         if (m_device == nullptr || !should_force_fog_state() || m_applyingForcedFogState)
-            return {};
+            return;
 
         const float range = std::max(m_fogEnd - m_fogStart, 1.0f);
         const FogDeviceState::Constant shaderFog{ 1.0f / range, 0.0f, m_fogEnd, 0.0f };
 
         m_applyingForcedFogState = true;
-        const auto writes = m_fogDeviceState.apply(m_device, float_to_dword(m_fogStart),
-            float_to_dword(m_fogEnd), shaderFog, m_fogComparison.optimized());
+        m_fogDeviceState.apply(m_device, float_to_dword(m_fogStart), float_to_dword(m_fogEnd), shaderFog);
         m_applyingForcedFogState = false;
-        return writes;
     }
 
     void restore_default_runtime()
@@ -1955,12 +1659,10 @@ private:
         if (zoneId == 0 || zoneId == m_currentZoneId)
             return;
 
-        finish_fog_comparison("zone_change");
         if (m_useZoneProfiles && m_currentZoneId != 0 && m_activeZoneHasProfile)
             save_zone_profile(m_currentZoneId);
 
         m_currentZoneId = zoneId;
-        finish_mip_comparison("zone_change");
         m_mipmaps.zone_changed();
         if (m_useZoneProfiles)
         {
@@ -2004,36 +1706,6 @@ private:
         const auto shift = lod_layout_shift(m_ffxiMainBase, m_ffxiMainSize);
         if (!shift) return false;
         return m_lodMode == LodMode::High ? install_lod_high(*shift) : install_lod_range(*shift);
-    }
-
-    void save_lod_diagnostic()
-    {
-        refresh_ffximain();
-        if (!m_ffxiMainBase || !m_ffxiMainSize) {
-            chat("LoD diagnostic: FFXiMain.dll is unavailable.");
-            return;
-        }
-        auto path = mip_log_path(m_core->GetInstallPath(), "VanaView-lod-diag");
-        path.replace_extension(".txt");
-        FILE* file = nullptr;
-        if (_wfopen_s(&file, path.c_str(), L"wbx") != 0 || !file) {
-            chat("LoD diagnostic could not open the log.");
-            return;
-        }
-        float world = 0.0f, entity = 0.0f;
-        const bool worldRead = safe_read(m_worldDistanceAddress, world);
-        const bool entityRead = safe_read(m_entityDistanceAddress, entity);
-        std::fprintf(file,
-            "image_size=%08X zone=%u lod=%d distance_requested=%.6f world=%.6f world_valid=%d entity=%.6f entity_valid=%d\n",
-            m_ffxiMainSize, static_cast<unsigned>(m_currentZoneId), static_cast<int>(m_lodMode),
-            m_drawDistance, world, worldRead, entity, entityRead);
-        std::fputs("legacy_sites\n", file);
-        for (const uint32_t site : {0x0017B63AU, 0x0017CAAFU})
-            write_lod_window(file, m_ffxiMainBase, m_ffxiMainSize, site);
-        std::fputs("comparison_candidates\n", file);
-        write_lod_candidates(file, m_ffxiMainBase, m_ffxiMainSize);
-        if (std::fclose(file) == 0) chat("LoD diagnostic saved: %s", path.filename().string().c_str());
-        else chat("LoD diagnostic could not finish the log.");
     }
 
     bool install_lod_high(uint32_t shift)
@@ -2087,17 +1759,10 @@ private:
     }
 
     MipmapExperiment m_mipmaps;
-    MipmapProfile m_mipProfile;
-    MipmapComparison m_mipComparison;
-    FogComparison m_fogComparison;
     FogDeviceState m_fogDeviceState;
-    std::atomic<bool> m_fogCompareRequested{false};
-    bool m_fogComparePausedMips = false;
     std::atomic<MipCommand> m_mipCommand{MipCommand::None};
     bool m_mipEnabled = true;
     bool m_mipStartupPending = false;
-    RenderDiagnostics m_diagnostics;
-    bool m_diagBackBuffer = false;
     IAshitaCore* m_core = nullptr;
     IDirect3DDevice8* m_device = nullptr;
     uintptr_t m_ffxiMainBase = 0;
