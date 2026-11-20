@@ -452,7 +452,7 @@ public:
     const char* GetAuthor(void) const override { return "rockerudon and By-T0r"; }
     const char* GetDescription(void) const override { return "Tunes world draw distance, map LoD, fog, and ground texture filtering."; }
     const char* GetLink(void) const override { return ""; }
-    double GetVersion(void) const override { return 1.76; }
+    double GetVersion(void) const override { return 1.77; }
 
     uint32_t GetFlags(void) const override
     {
