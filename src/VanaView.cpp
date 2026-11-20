@@ -301,11 +301,37 @@ namespace
     constexpr uint8_t LodHighPatch[][2] = {{0xEB, 0x1D}, {0xEB, 0x25}};
     constexpr uint8_t LodHighTarget[][3] = {{0x8B, 0x59, 0x18}, {0x8B, 0x4F, 0x18}};
 
+    struct TerrainSignature {
+        uint32_t rva;
+        const uint8_t* bytes;
+        uint32_t length;
+    };
+
+    template<size_t N>
+    uintptr_t terrain_site(uintptr_t base, uint32_t size, uint32_t siteRva,
+        const TerrainSignature (&signatures)[N])
+    {
+        if (!base) return 0;
+        for (const uint32_t shift : {0U, 0x15D0U}) {
+            bool matches = true;
+            for (const auto& sig : signatures) {
+                const auto rva = sig.rva + shift;
+                if (rva > size || sig.length > size - rva ||
+                    !bytes_match(base + rva, sig.bytes, sig.length)) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) return base + siteRva + shift;
+        }
+        return 0;
+    }
+
     std::optional<uint32_t> lod_layout_shift(uintptr_t base, uint32_t size)
     {
-        // In the alternate client layout, both routines are 0x1540 bytes later.
+        // The November retail layout is 0x15D0 bytes past the October layout.
         if (!base) return std::nullopt;
-        for (const uint32_t shift : {0U, 0x1540U}) {
+        for (const uint32_t shift : {0U, 0x1540U, 0x2B10U}) {
             const uint32_t lastByte = LodHighRvas.back() + shift + 2 + LodHighPatch[1][1] + sizeof(LodHighTarget[1]);
             if (lastByte > size) continue;
             bool matches = true;
@@ -1392,11 +1418,12 @@ private:
             return true;
         if (!m_ffxiMainBase || !m_ffxiMainSize)
             refresh_ffximain();
-        const uintptr_t site = m_ffxiMainBase + TerrainGroupSelectRva;
-        if (!m_ffxiMainBase || m_ffxiMainSize < TerrainGroupFallbackRva + sizeof(TerrainGroupFallback) ||
-            !bytes_match(site, TerrainGroupSelect, sizeof(TerrainGroupSelect)) ||
-            !bytes_match(m_ffxiMainBase + TerrainGroupFallbackRva, TerrainGroupFallback, sizeof(TerrainGroupFallback)))
-        {
+        constexpr TerrainSignature signatures[] = {
+            {TerrainGroupSelectRva, TerrainGroupSelect, sizeof(TerrainGroupSelect)},
+            {TerrainGroupFallbackRva, TerrainGroupFallback, sizeof(TerrainGroupFallback)},
+        };
+        const auto site = terrain_site(m_ffxiMainBase, m_ffxiMainSize, TerrainGroupSelectRva, signatures);
+        if (!site) {
             chat("Terrain extension unavailable for this client.");
             return false;
         }
@@ -1494,12 +1521,14 @@ private:
         if (range == 1.0f) {
             if (!restore_patch(m_terrainRangePatch)) return false;
         } else if (!m_terrainRangePatch.patched) {
-            const auto site = m_ffxiMainBase + TerrainRangeStoreRva;
-            if (!m_ffxiMainBase || m_ffxiMainSize < 0x17BFAC + sizeof(TerrainFarProjectionCall) ||
-                !bytes_match(m_ffxiMainBase + 0x17BF75, TerrainFarArguments, sizeof(TerrainFarArguments)) ||
-                !bytes_match(m_ffxiMainBase + 0x17BFAC, TerrainFarProjectionCall, sizeof(TerrainFarProjectionCall)) ||
-                !bytes_match(m_ffxiMainBase + 0x17BF45, TerrainRangeSetup, sizeof(TerrainRangeSetup)) ||
-                !bytes_match(site, TerrainRangeStore, sizeof(TerrainRangeStore))) {
+            constexpr TerrainSignature signatures[] = {
+                {0x17BF45, TerrainRangeSetup, sizeof(TerrainRangeSetup)},
+                {TerrainRangeStoreRva, TerrainRangeStore, sizeof(TerrainRangeStore)},
+                {0x17BF75, TerrainFarArguments, sizeof(TerrainFarArguments)},
+                {0x17BFAC, TerrainFarProjectionCall, sizeof(TerrainFarProjectionCall)},
+            };
+            const auto site = terrain_site(m_ffxiMainBase, m_ffxiMainSize, TerrainRangeStoreRva, signatures);
+            if (!site) {
                 chat("Object range unavailable for this client.");
                 return false;
             }
