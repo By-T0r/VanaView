@@ -11,13 +11,13 @@ VanaView is an Ashita v4 graphics plugin for Final Fantasy XI.
 
 Open `/vv` to adjust these settings while looking at the scene. The window scales with display height, and the sliders move in fixed steps for easy comparisons.
 
+**Phoenix players:** VanaView is incompatible with **Phoenix Lighting**. Disable Phoenix Lighting before loading VanaView.
+
 ## Install
 
 1. Download **VanaView.dll** from the [latest release](https://github.com/By-T0r/VanaView/releases/latest).
 2. Copy the DLL into the Ashita `plugins` directory. If updating a running client, unload VanaView first.
 3. Run `/load vanaview`, then `/vv`.
-
-**Phoenix Lighting is incompatible with VanaView.** Disable it before loading the plugin.
 
 ## Configuration
 
@@ -37,6 +37,8 @@ With dgVoodoo, set **DirectX → Mipmapping** to **App driven**. Trilinear and a
 Use `/vv help` for chat commands. For example, `/vv proprange 1.5` sets global object range and `/vv terraingroups zone off` excludes the current zone. Use `/vv terraingroups zone default` to follow the global setting again.
 
 ## Scope for server administrators
+
+**Phoenix compatibility:** VanaView and Phoenix Lighting cannot be used together.
 
 VanaView changes rendering in the local FFXI client. Draw distance affects both scenery and entities already available to the client, so a player may see an entity at a greater distance. Object range applies to map models. The terrain extension uses the map’s existing spatial tree on compatible layouts.
 
