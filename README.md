@@ -14,9 +14,9 @@ An Ashita v4 plugin for Final Fantasy XI. Open `/vv` to adjust visibility, terra
 
 | Control | Default | Effect |
 | --- | --- | --- |
-| Draw distance | 20 | Adjusts the distance at which the client draws the world and entities. |
+| Draw distance | 20 | Uses whole steps from 1 to 40. Adjusts the distance at which the client draws the world and entities. |
 | Object range | 1× | Extends the range of map objects such as trees and bushes up to 4×. Higher values can substantially reduce FPS in dense areas. |
-| Map LoD | Full | Keeps the highest available map detail. Game uses native detail transitions. Range lets you scale their distance. |
+| Map LoD | Full | Keeps the highest available map detail. Game uses native detail transitions. Older Range profiles use Game. |
 | Fog | Game | Game preserves the original weather-dependent fog distance. Distance makes fog follow the draw distance setting. Existing Custom profiles use Game. |
 | Extend distant terrain | On | Helps prevent distant scenery from disappearing as the camera turns. Applies on maps with compatible terrain groups and a spatial tree. |
 | Terrain mipmaps | On | Reduces shimmer on supported ground textures with bump mapping enabled or disabled. |

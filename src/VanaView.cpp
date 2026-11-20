@@ -231,7 +231,8 @@ namespace
     }
 
     constexpr float kDefaultDrawDistance = 1.0f;
-    constexpr float kMaxDrawDistance = 100.0f;
+    constexpr int kDistanceSliderMax = 40;
+    constexpr float kMaxDrawDistance = 100.0f; // Original mapping preserves existing slider values.
     constexpr float kDrawDistanceSliderPower = 2.0f;
     constexpr float kDefaultDrawDistanceSlider = 20.0f;
     constexpr float kDefaultPropRange = 1.0f;
@@ -245,10 +246,7 @@ namespace
         "Raises the game's world and entity draw distance. In Distance fog mode, "
         "the game's fog range is still linked to this raised distance.";
     constexpr const char* kLodModeHelp =
-        "Range scales the map LoD checks. Full keeps high-detail map models visible "
-        "and ignores the LoD range slider.";
-    constexpr const char* kLodRangeHelp =
-        "Scales the distance used by the Range LoD patch.";
+        "Game uses native detail transitions. Full keeps high-detail models visible.";
     constexpr const char* kFogModeHelp =
         "Game uses the original fog distance for the current weather. Distance ties fog to your draw distance.";
     float g_lodRangeScaleSq = 1.0f;
@@ -331,7 +329,7 @@ namespace
 
     float slider_to_draw_distance(const float value)
     {
-        const float normalized = clamp_float((value - 1.0f) / 99.0f, 0.0f, 1.0f);
+        const float normalized = clamp_float((clamp_float(std::round(value), 1.0f, kDistanceSliderMax) - 1.0f) / 99.0f, 0.0f, 1.0f);
         return kDefaultDrawDistance + (std::pow(normalized, kDrawDistanceSliderPower) * (kMaxDrawDistance - kDefaultDrawDistance));
     }
 
@@ -428,7 +426,7 @@ public:
     const char* GetAuthor(void) const override { return "rockerudon"; }
     const char* GetDescription(void) const override { return "Tunes world draw distance, map LoD, fog, and ground texture filtering."; }
     const char* GetLink(void) const override { return ""; }
-    double GetVersion(void) const override { return 1.74; }
+    double GetVersion(void) const override { return 1.75; }
 
     uint32_t GetFlags(void) const override
     {
@@ -618,9 +616,9 @@ public:
             }
             char* end = nullptr;
             const float parsed = std::strtof(value, &end);
-            if (end == value)
+            if (end == value || *end || !std::isfinite(parsed))
             {
-                chat("Usage: /vv distance <1-100> | default");
+                chat("Usage: /vv distance <1-40> | default");
                 return true;
             }
             if (parsed <= 0.0f)
@@ -635,7 +633,7 @@ public:
             m_drawDistance = distance;
             apply_draw_distances();
             save_config();
-            chat("Distance set to %.0f.", static_cast<double>(clamp_float(parsed, 1.0f, kMaxDrawDistance)));
+            chat("Distance set to %.0f.", static_cast<double>(draw_distance_to_slider(distance)));
             return true;
         }
 
@@ -647,15 +645,6 @@ public:
                 print_lod_status();
                 return true;
             }
-            if (std::isdigit(static_cast<unsigned char>(mode[0])) || mode[0] == '.')
-            {
-                m_lodRangeScale = clamp_float(std::strtof(mode, nullptr), kLodRangeMin, kLodRangeMax);
-                m_lodMode = LodMode::Range;
-                const bool ok = apply_lod_mode();
-                save_config();
-                chat(ok ? "LoD range %.2fx." : "LoD range failed. Signature mismatch.", static_cast<double>(m_lodRangeScale));
-                return true;
-            }
             if (iequals(mode, "full") || iequals(mode, "high"))
             {
                 m_lodMode = LodMode::High;
@@ -664,7 +653,7 @@ public:
                 chat(ok ? "LoD mode: full." : "LoD full failed. Signature mismatch.");
                 return true;
             }
-            if (iequals(mode, "default"))
+            if (iequals(mode, "game") || iequals(mode, "default"))
             {
                 m_lodMode = LodMode::Off;
                 m_lodRangeScale = 1.0f;
@@ -673,7 +662,7 @@ public:
                 chat("LoD restored to default.");
                 return true;
             }
-            chat("Usage: /vv lod <scale> | full | default");
+            chat("Usage: /vv lod full | game");
             return true;
         }
 
@@ -792,8 +781,8 @@ private:
         chat("/vv proprange <1-4> | off | status");
         print_terrain_group_help();
         chat("/vv opens the configuration window");
-        chat("/vv distance <1-100> | default");
-        chat("/vv lod <scale> | full | default");
+        chat("/vv distance <1-40> | default");
+        chat("/vv lod full | game");
         chat("/vv fog game | distance | status");
         chat("/vv zone on | off | status");
         chat("/vv reset");
@@ -914,7 +903,9 @@ private:
 
         auto* gui = m_core->GetGuiManager();
         const int themeCount = push_theme(gui);
-        gui->SetNextWindowSize(ImVec2(450.0f, 0.0f), ImGuiCond_Always);
+        const float scale = clamp_float(gui->GetIO().DisplaySize.y / 1080.0f, 1.0f, 2.0f);
+        gui->PushFont(nullptr, gui->GetStyle().FontSizeBase * scale);
+        gui->SetNextWindowSize(ImVec2(450.0f * scale, 0.0f), ImGuiCond_Always);
 
         bool open = m_windowOpen;
         if (gui->Begin("VanaView", &open, ImGuiWindowFlags_AlwaysAutoResize))
@@ -924,9 +915,9 @@ private:
                 gui->TextDisabled("Zone %u (%s)", unsigned(m_currentZoneId),
                     m_activeZoneHasProfile ? "zone profile" : "global fallback");
             gui->Text("Visibility");
-            float distance = draw_distance_to_slider(m_drawDistance);
-            gui->SetNextItemWidth(260.0f);
-            if (gui->SliderFloat("Draw distance", &distance, 1.0f, kMaxDrawDistance, "%.0f"))
+            int distance = static_cast<int>(std::lround(draw_distance_to_slider(m_drawDistance)));
+            gui->SetNextItemWidth(260.0f * scale);
+            if (gui->SliderInt("Draw distance", &distance, 1, kDistanceSliderMax))
             {
                 m_drawDistance = slider_to_draw_distance(distance);
                 apply_draw_distances();
@@ -934,10 +925,12 @@ private:
             }
             show_help_marker(gui, kDistanceHelp);
 
-            float range = m_propRange;
-            gui->SetNextItemWidth(260.0f);
-            if (gui->SliderFloat("Object range", &range, 1.0f, 4.0f, "%.2fx"))
-                save_prop_range(range);
+            int range = static_cast<int>(std::lround(m_propRange * 4));
+            char rangeLabel[24];
+            std::snprintf(rangeLabel, sizeof(rangeLabel), "%.2fx", double(m_propRange));
+            gui->SetNextItemWidth(260.0f * scale);
+            if (gui->SliderInt("Object range", &range, 4, 16, rangeLabel, ImGuiSliderFlags_NoInput))
+                save_prop_range(range * 0.25f);
             show_help_marker(gui, "Extends the distance of map objects such as trees. Higher values can reduce FPS.");
             gui->TextDisabled("Higher object range can lower FPS.");
             gui->Separator();
@@ -948,28 +941,12 @@ private:
             bool lodChanged = false;
             lodChanged = gui->RadioButton("Game##lod", &lodMode, static_cast<int>(LodMode::Off));
             gui->SameLine();
-            lodChanged = gui->RadioButton("Range##lod", &lodMode, static_cast<int>(LodMode::Range)) || lodChanged;
-            gui->SameLine();
             lodChanged = gui->RadioButton("Full##lod", &lodMode, static_cast<int>(LodMode::High)) || lodChanged;
             if (lodChanged)
             {
                 m_lodMode = static_cast<LodMode>(lodMode);
                 apply_lod_mode();
                 changed = true;
-            }
-
-            float lodScale = m_lodRangeScale;
-            if (m_lodMode == LodMode::Range)
-            {
-                gui->SetNextItemWidth(260.0f);
-                if (gui->SliderFloat("LoD range", &lodScale, kLodRangeMin, kLodRangeMax, "%.2fx"))
-                {
-                    m_lodRangeScale = clamp_float(lodScale, kLodRangeMin, kLodRangeMax);
-                    if (m_lodMode == LodMode::Range)
-                        apply_lod_mode();
-                    changed = true;
-                }
-                show_help_marker(gui, kLodRangeHelp);
             }
 
             gui->Separator();
@@ -1028,6 +1005,7 @@ private:
                 save_config();
         }
         gui->End();
+        gui->PopFont();
 
         m_windowOpen = open;
         if (themeCount > 0)
@@ -1089,7 +1067,7 @@ private:
 
     void load_global_profile(const int configVersion)
     {
-        m_drawDistance = clamp_float(read_profile_float("draw", "distance", read_profile_float("draw", "world", default_draw_distance())), 1.0f, kMaxDrawDistance);
+        m_drawDistance = clamp_float(read_profile_float("draw", "distance", read_profile_float("draw", "world", default_draw_distance())), 1.0f, slider_to_draw_distance(kDistanceSliderMax));
         if (configVersion < 8)
             m_drawDistance = default_draw_distance();
         m_lodMode = static_cast<LodMode>(::GetPrivateProfileIntA("lod", "mode", static_cast<int>(LodMode::High), m_configPath));
@@ -1097,8 +1075,8 @@ private:
         const int rawFogMode = ::GetPrivateProfileIntA("fog", "mode", static_cast<int>(FogMode::Game), m_configPath);
         m_fogMode = parse_fog_mode(rawFogMode);
 
-        if (m_lodMode != LodMode::Off && m_lodMode != LodMode::High && m_lodMode != LodMode::Range)
-            m_lodMode = LodMode::Range;
+        if (m_lodMode != LodMode::High)
+            m_lodMode = LodMode::Off;
     }
 
     void save_config(const bool createZoneProfile = true)
@@ -1152,13 +1130,13 @@ private:
         if (!profile_section_exists(section))
             return false;
 
-        m_drawDistance = clamp_float(read_profile_float(section, "distance", m_drawDistance), 1.0f, kMaxDrawDistance);
-        m_lodMode = static_cast<LodMode>(::GetPrivateProfileIntA(section, "lod_mode", static_cast<int>(m_lodMode == LodMode::Off ? LodMode::Range : m_lodMode), m_configPath));
+        m_drawDistance = clamp_float(read_profile_float(section, "distance", m_drawDistance), 1.0f, slider_to_draw_distance(kDistanceSliderMax));
+        m_lodMode = static_cast<LodMode>(::GetPrivateProfileIntA(section, "lod_mode", static_cast<int>(m_lodMode), m_configPath));
         m_lodRangeScale = clamp_float(read_profile_float(section, "lod_range", m_lodRangeScale), kLodRangeMin, kLodRangeMax);
         const int rawFogMode = ::GetPrivateProfileIntA(section, "fog_mode", static_cast<int>(m_fogMode), m_configPath);
         m_fogMode = parse_fog_mode(rawFogMode);
-        if (m_lodMode != LodMode::Off && m_lodMode != LodMode::High && m_lodMode != LodMode::Range)
-            m_lodMode = LodMode::Range;
+        if (m_lodMode != LodMode::High)
+            m_lodMode = LodMode::Off;
         return true;
     }
 
@@ -1281,7 +1259,7 @@ private:
         if (!m_originalDrawCaptured)
             return;
 
-        m_drawDistance = clamp_float(m_originalWorldDistance, 1.0f, kMaxDrawDistance);
+        m_drawDistance = clamp_float(m_originalWorldDistance, 1.0f, slider_to_draw_distance(kDistanceSliderMax));
     }
 
     bool install_native_fog_scale()
