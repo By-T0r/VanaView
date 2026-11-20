@@ -423,10 +423,10 @@ class VanaView final : public IPlugin
 {
 public:
     const char* GetName(void) const override { return "VanaView"; }
-    const char* GetAuthor(void) const override { return "rockerudon"; }
+    const char* GetAuthor(void) const override { return "rockerudon and By-T0r"; }
     const char* GetDescription(void) const override { return "Tunes world draw distance, map LoD, fog, and ground texture filtering."; }
     const char* GetLink(void) const override { return ""; }
-    double GetVersion(void) const override { return 1.75; }
+    double GetVersion(void) const override { return 1.76; }
 
     uint32_t GetFlags(void) const override
     {
@@ -462,7 +462,7 @@ public:
             update_terrain_group_zone(get_current_zone());
         }
         set_prop_range(read_profile_float("props", "range", kDefaultPropRange));
-        chat("VanaView loaded. Use /vv to configure.");
+        chat("VanaView loaded. Original plugin by rockerudon. Fork development by By-T0r. Use /vv to configure.");
         return true;
     }
 

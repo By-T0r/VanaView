@@ -50,4 +50,8 @@ The plugin entry point, commands and rendering hooks are in [VanaView.cpp](src/V
 
 Set `ASHITA_SDK` to the directory containing `Ashita.h` for plugin interface 4.30. Run `./build.ps1` with Visual Studio 2022 x86 C++ build tools installed. The script builds `dist/VanaView.dll` and checks its exports and plugin interface.
 
-Created by **rockerudon**. This fork is maintained by **By-T0r**. Released under the [MIT License](LICENSE).
+## Credits
+
+**rockerudon** created the original VanaView plugin. **By-T0r** develops and maintains this fork.
+
+Released under the [MIT License](LICENSE).
