@@ -7,7 +7,16 @@ build/
 *.ilk
 
 # Keep the released DLL in dist/, ignore stray copies elsewhere
-/*.dll
+*.dll
+!/dist/VanaView.dll
+
+# Local research and client captures
+/logs/
+/captures/
+/research-local/
+/PROJECT_MEMORY.md
+*.etl
+__pycache__/
 
 # Editor / OS
 .vs/
