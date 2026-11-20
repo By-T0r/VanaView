@@ -48,6 +48,8 @@ $clArgs = @(
     "/Fe:`"$outDll`"",
     "/Fo:`"$obj`"",
     "`"$src`""
+    '/link',
+    "/IMPLIB:`"$buildDir\VanaView.lib`""
 ) -join ' '
 
 $command = "`"$vcvars`" >nul && cl.exe $clArgs"

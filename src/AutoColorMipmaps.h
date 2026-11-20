@@ -2,7 +2,6 @@
 
 #include "Dxt3Mipmaps.h"
 #include "MipmapDiskCache.h"
-#include "MipmapProfile.h"
 #include <atomic>
 #include <chrono>
 #include <optional>
@@ -15,7 +14,7 @@
 class AutoColorMipmaps
 {
     using Source = Microsoft::WRL::ComPtr<IDirect3DBaseTexture8>;
-    static constexpr size_t MaxBytes = 8 * 1024 * 1024;
+    static constexpr size_t MaxBytes = 16 * 1024 * 1024;
     static constexpr size_t MaxDetailBytes = 4 * 1024 * 1024;
 
     struct Material
@@ -23,6 +22,8 @@ class AutoColorMipmaps
         Source color, detail;
         Dxt3::Layout layout;
         DWORD shader;
+
+        size_t ready_bytes() const { return layout.bytes + (detail ? 3 : 2) * layout.top_bytes(); }
     };
 
     struct Entry
@@ -37,7 +38,7 @@ class AutoColorMipmaps
         uint64_t detailRetry = 0;
         bool detailUsed = false;
 
-        size_t bytes() const { return material.layout.bytes + (material.detail ? 3 : 2) * material.layout.top_bytes(); }
+        size_t bytes() const { return material.ready_bytes(); }
         size_t detail_bytes() const { return detailReplacement ? material.layout.bytes + detailTop.size() : 0; }
     };
 
@@ -63,16 +64,19 @@ class AutoColorMipmaps
         Dxt3::Texture texture;
         size_t offset = 0;
         UINT level = 0;
+        UINT row = 0;
     };
 
 public:
     using Clock = std::chrono::steady_clock;
+    static constexpr size_t EntryLimit = 96;
     static constexpr size_t ReadyBudget = MaxBytes + MaxDetailBytes;
     static constexpr size_t WorkBudget = 8 * 1024 * 1024;
 
     struct Stats
     {
         uint64_t generated = 0, evicted = 0, invalidated = 0, rejected = 0, peakUs = 0;
+        uint64_t capacityDeferred = 0;
         uint64_t snapshotUs = 0, buildUs = 0, createUs = 0, uploadUs = 0, firstUseUs = 0;
         uint64_t paced = 0;
         uint64_t diskHits = 0, diskMisses = 0, diskWrites = 0, diskErrors = 0, diskUs = 0;
@@ -121,16 +125,6 @@ public:
         if (m_upload && m_upload->request.detail) m_upload.reset();
         std::erase_if(m_waiting, [](const Request& request) { return request.detail; });
     }
-    void drawn() { ++m_frameWork.draws; }
-
-    MipmapFrameWork frame_work() const
-    {
-        auto work = m_frameWork;
-        work.ready = count();
-        work.pending = pending();
-        return work;
-    }
-
     void clear()
     {
         cancel_pending();
@@ -143,12 +137,12 @@ public:
         m_nextFirstUseFrame = 0;
         m_firstUseThisFrame = false;
         m_lastPresent = {};
-        m_frameWork = {};
     }
 
     void start()
     {
         clear();
+        m_cache.reserve(EntryLimit);
         m_waiting.reserve(MaxWaiting);
         m_stats = {};
         m_frame = 0;
@@ -169,7 +163,7 @@ public:
         }
 
         auto& entry = found->second;
-        if (m_frame - entry.checked > RecheckInterval + MaxEntries) return {};
+        if (m_frame - entry.checked > RecheckInterval + EntryLimit) return {};
         const auto pass = describe_pass(device, type, useBlend);
         if (!pass.valid || entry.material.shader != pass.shader || (pass.blended && !entry.used) ||
             !uses_mips(device)) return {};
@@ -206,8 +200,7 @@ public:
 
     void finish_first_use(IDirect3DBaseTexture8* original, Clock::time_point start, bool drawn, bool detailUsed)
     {
-        m_frameWork.firstDrawUs = record_peak(m_stats.firstUseUs, start);
-        if (drawn) ++m_frameWork.firstDraws;
+        record_peak(m_stats.firstUseUs, start);
         const auto it = m_cache.find(original);
         if (drawn && it != m_cache.end()) {
             it->second.used = true;
@@ -218,7 +211,6 @@ public:
     void present(IDirect3DDevice8* device)
     {
         const auto start = Clock::now();
-        m_frameWork = {};
         const bool slowFrame = m_lastPresent != Clock::time_point{} && start - m_lastPresent > std::chrono::milliseconds(22);
         m_lastPresent = start;
         ++m_frame;
@@ -234,29 +226,32 @@ public:
                 m_nextWorkFrame = m_frame + 3;
             } else {
                 ++m_stats.paced;
-                m_frameWork.paced = true;
             }
         }
         if (m_candidate && m_upload) ++m_stats.overlapFrames;
         m_firstUseThisFrame = false;
-        m_frameWork.presentUs = record_peak(m_stats.peakUs, start);
+        record_peak(m_stats.peakUs, start);
     }
 
 private:
-    static constexpr size_t MaxEntries = 32;
     static constexpr uint64_t FirstUseSpacing = 4;
     static constexpr uint64_t RecheckInterval = 60;
     static constexpr size_t UploadBytesPerFrame = 128 * 1024;
     static constexpr UINT UploadLevelsPerFrame = 4;
     static constexpr size_t MaxWaiting = 4;
     static constexpr size_t MaxRecordedUses = 1024;
-    static constexpr UINT MaxDimension = 512;
-    static constexpr Dxt3::Layout Largest{MaxDimension, MaxDimension};
+    static constexpr UINT MaxDimension = 1024;
+    static constexpr size_t MaxPixels = 512 * 1024;
+    static constexpr Dxt3::Layout Largest{512, 1024};
+    static constexpr Dxt3::Layout Small{512, 512};
+    static constexpr size_t MaxQueuedSourceBytes = 1024 * 1024;
     // Source pairs pinned by the queue, builder and upload, plus decoded pixels,
     // encoded buffers, replacement texture and the final level-zero copy.
-    static constexpr size_t MaxWorkBytes = (MaxWaiting + 2) * 2 * Largest.top_bytes() +
-        size_t(MaxDimension) * MaxDimension * sizeof(Dxt3::Pixel) * 5 / 4 +
-        4 * Largest.bytes + Largest.top_bytes();
+    // At most one large active job; queued references have a separate cap.
+    static constexpr size_t MaxWorkBytes = MaxQueuedSourceBytes +
+        2 * (Largest.top_bytes() + Small.top_bytes()) +
+        MaxPixels * sizeof(Dxt3::Pixel) * 5 / 4 +
+        2 * (Largest.bytes + Small.bytes) + Largest.top_bytes();
     static_assert(MaxWorkBytes <= WorkBudget);
     static constexpr auto PipelineBudget = std::chrono::microseconds(250);
 
@@ -341,6 +336,12 @@ private:
 
     void enqueue(Request item)
     {
+        const auto sourceBytes = [](const Request& r) {
+            return r.material.layout.top_bytes() * (r.material.detail ? 2 : 1);
+        };
+        size_t queuedBytes = 0;
+        for (const auto& r : m_waiting) queuedBytes += sourceBytes(r);
+        if (sourceBytes(item) > MaxQueuedSourceBytes - queuedBytes) return;
         if (m_waiting.size() == MaxWaiting) {
             // A newly visible base texture can use a waiting detail slot.
             const auto low = std::find_if(m_waiting.rbegin(), m_waiting.rend(),
@@ -357,7 +358,7 @@ private:
         if ((skip.color == color && skip.until > m_frame) || m_attempts >= 4) return;
         D3DSURFACE_DESC colorDesc{}, detailDesc{};
         if (!Dxt3::describe(color, colorDesc) || !eligible_dimension(colorDesc.Width) ||
-            !eligible_dimension(colorDesc.Height)) {
+            !eligible_dimension(colorDesc.Height) || size_t(colorDesc.Width) * colorDesc.Height > MaxPixels) {
             skip_slot(color) = {color, m_frame + 120};
             return;
         }
@@ -484,6 +485,8 @@ private:
         const auto color = std::find_if(m_waiting.begin(), m_waiting.end(),
             [](const Request& request) { return !request.detail; });
         const auto next = color != m_waiting.end() ? color : m_waiting.begin();
+        if (m_upload && m_upload->request.material.layout.top_bytes() > Small.top_bytes() &&
+            next->material.layout.top_bytes() > Small.top_bytes()) return;
         m_candidate.emplace(std::move(*next));
         m_waiting.erase(next);
         const auto& request = *m_candidate;
@@ -495,7 +498,7 @@ private:
         }
         const auto start = Clock::now();
         snapshot();
-        m_frameWork.readUs = record_peak(m_stats.snapshotUs, start);
+        record_peak(m_stats.snapshotUs, start);
     }
 
     bool read_source(IDirect3DBaseTexture8* texture, const Dxt3::Layout& layout, bool& likeNormal, uint8_t* top)
@@ -597,14 +600,26 @@ private:
         size_t bytesCopied = 0;
         for (UINT i = 0; i < UploadLevelsPerFrame && upload.level < layout.levels; ++i) {
             const auto bytes = layout.level_bytes(upload.level);
-            // A large top level gets a frame to itself.
-            if (i && (bytesCopied + bytes > UploadBytesPerFrame ||
-                      Clock::now() - start >= std::chrono::microseconds(250))) break;
-            if (!Dxt3::upload_level(upload.texture.Get(), layout, upload.level, upload.data.data() + upload.offset))
-                return false;
+            const auto stride = Dxt3::pitch(std::max(1u, layout.width >> upload.level));
+            const auto rows = Dxt3::rows(std::max(1u, layout.height >> upload.level));
+            const auto count = static_cast<UINT>(std::min<size_t>(rows - upload.row,
+                (UploadBytesPerFrame - bytesCopied) / stride));
+            if (!count || (i && Clock::now() - start >= PipelineBudget)) break;
+            D3DLOCKED_RECT lock{};
+            if (FAILED(upload.texture->LockRect(upload.level, &lock, nullptr, 0))) return false;
+            const bool valid = lock.pBits && lock.Pitch >= static_cast<INT>(stride);
+            if (valid) {
+                for (UINT row = upload.row; row < upload.row + count; ++row)
+                    std::memcpy(static_cast<uint8_t*>(lock.pBits) + row * lock.Pitch,
+                        upload.data.data() + upload.offset + row * stride, stride);
+            }
+            if (FAILED(upload.texture->UnlockRect(upload.level)) || !valid) return false;
+            bytesCopied += count * stride;
+            upload.row += count;
+            if (upload.row != rows) break;
+            upload.row = 0;
             ++upload.level;
             upload.offset += bytes;
-            bytesCopied += bytes;
         }
         return true;
     }
@@ -614,7 +629,6 @@ private:
         if (m_upload || !m_candidate || !m_buildDone.load(std::memory_order_acquire)) return;
         m_worker.join();
         m_stats.buildUs = std::max(m_stats.buildUs, m_buildTime);
-        m_frameWork.buildUs = m_buildTime;
         m_stats.diskHits += m_diskWork.hit;
         m_stats.diskMisses += m_diskWork.miss;
         m_stats.diskWrites += m_diskWork.wrote;
@@ -646,10 +660,10 @@ private:
             bool ok;
             if (!upload.texture) {
                 ok = Dxt3::create(device, layout, upload.texture);
-                m_frameWork.createUs = record_peak(m_stats.createUs, start);
+                record_peak(m_stats.createUs, start);
             } else {
                 ok = upload_levels(upload, start);
-                m_frameWork.copyUs = record_peak(m_stats.uploadUs, start);
+                record_peak(m_stats.uploadUs, start);
             }
             if (!ok) {
                 ++m_stats.errors;
@@ -674,9 +688,37 @@ private:
         }
 
         const auto topBytes = layout.top_bytes();
+        const size_t bytes = material.ready_bytes();
+        if (!make_room(bytes)) {
+            ++m_stats.capacityDeferred;
+            reject_upload();
+            return;
+        }
         Entry entry{std::move(material), std::move(upload.texture),
             std::vector<uint8_t>(data.data(), data.data() + topBytes), m_frame, m_frame};
-        while (m_cache.size() >= MaxEntries || m_bytes + entry.bytes() > MaxBytes) {
+        auto* key = entry.material.color.Get();
+        m_cache.emplace(key, std::move(entry));
+        m_bytes += bytes;
+        ++m_stats.generated;
+        m_upload.reset();
+    }
+
+    bool make_room(size_t bytes)
+    {
+        if (bytes > MaxBytes) return false;
+        if (m_cache.size() < EntryLimit && m_bytes <= MaxBytes - bytes) return true;
+
+        // Present increments the frame before processing uploads. Entries
+        // seen in the preceding draw phase are still on screen.
+        size_t visibleEntries = 0, visibleBytes = 0;
+        for (const auto& [key, entry] : m_cache) {
+            if (m_frame - entry.seen > 1) continue;
+            ++visibleEntries;
+            visibleBytes += entry.bytes();
+        }
+        if (visibleEntries >= EntryLimit || visibleBytes > MaxBytes - bytes) return false;
+
+        while (m_cache.size() >= EntryLimit || m_bytes > MaxBytes - bytes) {
             const auto oldest = std::min_element(m_cache.begin(), m_cache.end(), [](const auto& a, const auto& b) {
                 return a.second.seen < b.second.seen;
             });
@@ -685,12 +727,7 @@ private:
             m_cache.erase(oldest);
             ++m_stats.evicted;
         }
-        auto* key = entry.material.color.Get();
-        const size_t bytes = entry.bytes();
-        m_cache.emplace(key, std::move(entry));
-        m_bytes += bytes;
-        ++m_stats.generated;
-        m_upload.reset();
+        return true;
     }
 
     uint64_t m_frame = 0;
@@ -699,7 +736,6 @@ private:
     size_t m_bytes = 0, m_detailBytes = 0;
     unsigned m_attempts = 0;
     Stats m_stats;
-    MipmapFrameWork m_frameWork;
     std::unordered_map<IDirect3DBaseTexture8*, Entry> m_cache;
     std::array<Skip, 256> m_skips{};
     std::vector<Request> m_waiting;

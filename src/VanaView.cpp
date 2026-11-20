@@ -2,11 +2,8 @@
 #define NOMINMAX
 
 #include "Ashita.h"
-#include "RenderDiagnostics.h"
-#include "MipmapExperiment.h"
-#include "MipmapComparison.h"
-#include "FogComparison.h"
-#include "FogDeviceState.h"
+#include "TerrainMipmaps.h"
+#include "FogDistanceScale.h"
 
 #include <algorithm>
 #include <atomic>
@@ -131,49 +128,6 @@ namespace
         }
     }
 
-    void write_lod_window(FILE* file, uintptr_t base, uint32_t imageSize, uint32_t center)
-    {
-        const uint32_t start = center >= 40 ? center - 40 : 0;
-        const uint32_t end = std::min(imageSize, center + 112);
-        std::fprintf(file, "%08X (%08X):", center, start);
-        for (uint32_t offset = start; offset < end; ++offset) {
-            uint8_t byte = 0;
-            if (safe_read(base + offset, byte)) std::fprintf(file, " %02X", static_cast<unsigned>(byte));
-            else std::fputs(" ??", file);
-        }
-        std::fputc('\n', file);
-    }
-
-    void write_lod_candidates(FILE* file, uintptr_t base, uint32_t imageSize)
-    {
-        // Locate the two consecutive x87 map-distance comparisons around
-        // offsets C8 and CC, allowing different stacks and object registers.
-        static constexpr unsigned MaxCandidates = 128;
-        unsigned found = 0;
-        const uintptr_t limit = base + imageSize;
-        for (uintptr_t pc = base; pc < limit && found < MaxCandidates;) {
-            MEMORY_BASIC_INFORMATION page{};
-            if (!VirtualQuery(reinterpret_cast<const void*>(pc), &page, sizeof(page))) break;
-            const uintptr_t end = std::min<uintptr_t>(limit, reinterpret_cast<uintptr_t>(page.BaseAddress) + page.RegionSize);
-            const DWORD protect = page.Protect & 0xFF;
-            const bool executable = protect == PAGE_EXECUTE_READ || protect == PAGE_EXECUTE_READWRITE ||
-                protect == PAGE_EXECUTE_WRITECOPY;
-            if (page.State == MEM_COMMIT && executable && !(page.Protect & PAGE_GUARD)) {
-                for (uintptr_t at = pc; at + 6 <= end && found < MaxCandidates; ++at) {
-                    std::array<uint8_t, 6> bytes{};
-                    if (*reinterpret_cast<const uint8_t*>(at) != 0xD8 || !safe_read(at, bytes)) continue;
-                    if ((bytes[1] & 0xF8) != 0x98 || (bytes[2] != 0xC8 && bytes[2] != 0xCC) ||
-                        bytes[3] || bytes[4] || bytes[5]) continue;
-                    write_lod_window(file, base, imageSize, static_cast<uint32_t>(at - base));
-                    ++found;
-                }
-            }
-            if (end <= pc) break;
-            pc = end;
-        }
-        std::fprintf(file, "candidate_count=%u limit=%u\n", found, MaxCandidates);
-    }
-
     bool write_bytes_patch(BytesPatchSite& site, const uintptr_t address, const uint8_t* patch, const uint32_t length)
     {
         if (site.patched)
@@ -276,27 +230,12 @@ namespace
         return value;
     }
 
-    DWORD float_to_dword(const float value)
-    {
-        DWORD out = 0;
-        std::memcpy(&out, &value, sizeof(out));
-        return out;
-    }
-
-    float dword_to_float(const DWORD value)
-    {
-        float out = 0.0f;
-        std::memcpy(&out, &value, sizeof(out));
-        return out;
-    }
-
     constexpr float kDefaultDrawDistance = 1.0f;
-    constexpr float kMaxDrawDistance = 100.0f;
+    constexpr int kDistanceSliderMax = 40;
+    constexpr float kMaxDrawDistance = 100.0f; // Original mapping preserves existing slider values.
     constexpr float kDrawDistanceSliderPower = 2.0f;
     constexpr float kDefaultDrawDistanceSlider = 20.0f;
-    constexpr float kDefaultFogStart = 20.0f;
-    constexpr float kDefaultFogEnd = 120.0f;
-    constexpr float kMaxFogDistance = 1000.0f;
+    constexpr float kDefaultPropRange = 1.0f;
     constexpr float kLodRangeMin = 0.25f;
     constexpr float kLodRangeMax = 10.0f;
     constexpr int kConfigVersion = 9;
@@ -307,22 +246,48 @@ namespace
         "Raises the game's world and entity draw distance. In Distance fog mode, "
         "the game's fog range is still linked to this raised distance.";
     constexpr const char* kLodModeHelp =
-        "Range scales the map LoD checks. Full keeps high-detail map models visible "
-        "and ignores the LoD range slider.";
-    constexpr const char* kLodRangeHelp =
-        "Scales the distance used by the Range LoD patch.";
-    constexpr const char* kLodRangeDisabledHelp =
-        "Disabled while LoD is Full. Switch LoD to Range to tune this value.";
+        "Game uses native detail transitions. Full keeps high-detail models visible.";
     constexpr const char* kFogModeHelp =
-        "Distance uses the game's fog exactly as emitted, so it follows raised draw distance. "
-        "Game uses the last natural fog range captured from the game and reapplies it with raised distance; "
-        "it refreshes when the game sends new fog values, such as on zone or weather updates. "
-        "Custom forces the Fog start/end sliders.";
+        "Game uses the original fog distance for the current weather. Distance ties fog to your draw distance.";
     float g_lodRangeScaleSq = 1.0f;
     uintptr_t g_lodRangeReturn0 = 0;
     uintptr_t g_lodRangeReturn1 = 0;
     uintptr_t g_lodRangeReturn2 = 0;
     uintptr_t g_lodRangeReturn3 = 0;
+
+    float g_propRangeScaleSquared = 1.0f;
+    uintptr_t g_terrainRangeReturn = 0;
+    constexpr uint32_t TerrainRangeStoreRva = 0x0017BF58;
+    constexpr uint8_t TerrainRangeSetup[] = {
+        0xD9, 0x9D, 0x24, 0x94, 0x03, 0x00, // fstp [ebp+39424h], the squared world radius
+    };
+    constexpr uint8_t TerrainRangeStore[] = {
+        0xD9, 0x9D, 0x28, 0x94, 0x03, 0x00, // fstp [ebp+39428h], the per-block squared-range multiplier
+    };
+    constexpr uint8_t TerrainFarArguments[] = {
+        0x8B, 0x85, 0xB4, 0x55, 0x03, 0x00, // mov eax, [ebp+355B4h]
+        0x51, 0x68, 0xCD, 0xCC, 0x4C, 0x3E, // push far; push 0.2f
+        0x51, 0x8D, 0xB5, 0x5C, 0x8E, 0x03, 0x00, // temporary fov; terrain projection destination
+    };
+    constexpr uint8_t TerrainFarProjectionCall[] = {
+        0xD9, 0x1C, 0x24, 0x50, 0x51, 0x56, 0x8B, 0xCD, 0xE8, 0xD7, 0x64, 0x00, 0x00,
+    };
+
+    uintptr_t g_terrainGroupReturn = 0;
+    // Lower 16 bits: Ashita zone ID. Bit 16: bypass permitted in this zone.
+    volatile LONG g_terrainGroupPolicy = 0;
+    constexpr uint32_t TerrainGroupSelectRva = 0x0017C2A8;
+    constexpr uint32_t TerrainGroupHookLength = 6;
+    constexpr uint8_t TerrainGroupSelect[] = {
+        0x8B, 0x44, 0x24, 0x20, 0x3B, 0xC3, // mov eax, [esp+20h]; cmp eax, ebx
+        0x0F, 0x84, 0xD1, 0x00, 0x00, 0x00, // Jump to the normal spatial traversal if no group is selected.
+        0x39, 0x5E, 0xFC, 0x0F, 0x84, 0xC8, 0x00, 0x00, 0x00, // Same fallback if the map has no group table.
+    };
+    constexpr uint32_t TerrainGroupFallbackRva = 0x0017C385;
+    constexpr uint8_t TerrainGroupFallback[] = {
+        0x39, 0x1E, 0x74, 0x42, // cmp [esi], ebx; jump to full scan if quadtree is missing
+        0x8B, 0x85, 0x4C, 0x94, 0x03, 0x00,
+    };
 
     constexpr std::array<uint32_t, 4> LodRangeRvas{0x0017B629, 0x0017B641, 0x0017CA9E, 0x0017CABA};
     constexpr std::array<uint32_t, 2> LodHighRvas{0x0017B63A, 0x0017CAAF};
@@ -364,7 +329,7 @@ namespace
 
     float slider_to_draw_distance(const float value)
     {
-        const float normalized = clamp_float((value - 1.0f) / 99.0f, 0.0f, 1.0f);
+        const float normalized = clamp_float((clamp_float(std::round(value), 1.0f, kDistanceSliderMax) - 1.0f) / 99.0f, 0.0f, 1.0f);
         return kDefaultDrawDistance + (std::pow(normalized, kDrawDistanceSliderPower) * (kMaxDrawDistance - kDefaultDrawDistance));
     }
 
@@ -418,14 +383,50 @@ extern "C" __declspec(naked) void vanaview_lod_range3_hook()
     }
 }
 
+// Scale the squared object distance before the client stores it.
+extern "C" __declspec(naked) void vanaview_terrain_range_hook()
+{
+    __asm {
+        fmul dword ptr [g_propRangeScaleSquared]
+        fstp dword ptr [ebp + 0x39428]
+        jmp dword ptr [g_terrainRangeReturn]
+    }
+}
+
+extern "C" __declspec(naked) void vanaview_terrain_group_hook()
+{
+    __asm {
+        mov eax, dword ptr [esp + 0x20]
+        push edx
+        mov edx, dword ptr [ebp + 0x3C] // Main zone ID, shared by its submaps.
+        test edx, edx
+        jz finish_group_selection
+        cmp eax, ebx
+        je finish_group_selection
+        cmp dword ptr [esi - 4], ebx
+        je finish_group_selection
+        cmp dword ptr [esi], ebx // Quadtree for the current layout.
+        je finish_group_selection // Preserve groups when the alternative is a full scan.
+        or edx, 0x10000
+        cmp edx, dword ptr [g_terrainGroupPolicy]
+        jne finish_group_selection // Also covers a mismatch during a zone transition.
+        mov eax, ebx // Satisfy the client's original branch to the quadtree.
+        mov dword ptr [esp + 0x24], ebx // Consume the selection as the grouped path would.
+    finish_group_selection:
+        pop edx
+        cmp eax, ebx
+        jmp dword ptr [g_terrainGroupReturn]
+    }
+}
+
 class VanaView final : public IPlugin
 {
 public:
     const char* GetName(void) const override { return "VanaView"; }
-    const char* GetAuthor(void) const override { return "rockerudon"; }
+    const char* GetAuthor(void) const override { return "rockerudon and By-T0r"; }
     const char* GetDescription(void) const override { return "Tunes world draw distance, map LoD, fog, and ground texture filtering."; }
     const char* GetLink(void) const override { return ""; }
-    double GetVersion(void) const override { return 1.39; }
+    double GetVersion(void) const override { return 1.76; }
 
     uint32_t GetFlags(void) const override
     {
@@ -454,36 +455,36 @@ public:
         capture_original_draw_distances();
         apply_draw_distances();
         apply_lod_mode();
-        chat("VanaView loaded. Use /vv to configure.");
+        apply_active_fog_mode();
+        m_terrainGroupsEnabled = ::GetPrivateProfileIntA("terrain_groups", "enabled", 1, m_configPath) != 0;
+        if (m_terrainGroupsEnabled) {
+            m_terrainGroupsEnabled = install_terrain_group_hook();
+            update_terrain_group_zone(get_current_zone());
+        }
+        set_prop_range(read_profile_float("props", "range", kDefaultPropRange));
+        chat("VanaView loaded. Original plugin by rockerudon. Fork development by By-T0r. Use /vv to configure.");
         return true;
     }
 
     void Release(void) override
     {
-        finish_fog_comparison("unload");
-        finish_mip_comparison("unload");
-        save_mip_profile("unload");
+        restore_patch(m_terrainRangePatch);
+        ::InterlockedExchange(&g_terrainGroupPolicy, 0);
+        restore_patch(m_terrainGroupPatch);
+        ::InterlockedExchange(&FogDistanceScale::enabled, 0);
+        restore_patch(m_fogScaleWorld);
+        restore_patch(m_fogScaleEntity);
         m_mipmaps.stop();
-        m_diagnostics.cancel();
         save_config(false);
-        m_gameFogSampling = false;
         restore_draw_distances();
         restore_lod_patches();
         m_fogMode = FogMode::DistanceLinked;
-        restore_fog_state();
         m_device = nullptr;
     }
 
     bool Direct3DInitialize(IDirect3DDevice8* device) override
     {
-        finish_fog_comparison("device_init");
-        finish_mip_comparison("device_init");
-        save_mip_profile("device_init");
-        m_mipProfile.reset();
         m_mipmaps.stop();
-        m_diagnostics.cancel();
-        m_diagBackBuffer = false;
-        m_fogDeviceState = {};
         m_device = device;
         m_mipStartupPending = true;
         return true;
@@ -521,6 +522,33 @@ public:
             return true;
         }
 
+        if (iequals(sub, "proprange"))
+        {
+            const char* value = strtok_s(nullptr, " \t", &context);
+            if (!value || iequals(value, "status"))
+                chat("Object range %.2fx", double(m_propRange));
+            else {
+                char* end = nullptr;
+                const float range = iequals(value, "off") ? 1.0f : std::strtof(value, &end);
+                if ((end && (*end || end == value)) || !(range >= 1 && range <= 4))
+                    chat("/vv proprange <1-4> | off | status");
+                else
+                    save_prop_range(range);
+            }
+            return true;
+        }
+
+        if (iequals(sub, "terraingroups"))
+        {
+            const char* mode = strtok_s(nullptr, " \t", &context);
+            const char* scopeValue = strtok_s(nullptr, " \t", &context);
+            if (strtok_s(nullptr, " \t", &context))
+                print_terrain_group_help();
+            else
+                handle_terrain_groups(mode, scopeValue);
+            return true;
+        }
+
         if (iequals(sub, "mip"))
         {
             const char* action = strtok_s(nullptr, " \t", &context);
@@ -528,50 +556,9 @@ public:
                 auto pending = MipCommand::None;
                 m_mipCommand.compare_exchange_strong(pending, MipCommand::Status);
             }
-            else if (iequals(action, "color")) m_mipCommand.store(MipCommand::Color);
-            else if (iequals(action, "pair")) m_mipCommand.store(MipCommand::Pair);
-            else if (iequals(action, "auto")) m_mipCommand.store(MipCommand::Auto);
             else if (iequals(action, "on")) m_mipCommand.store(MipCommand::On);
-            else if (iequals(action, "pause")) m_mipCommand.store(MipCommand::Pause);
-            else if (iequals(action, "resume")) m_mipCommand.store(MipCommand::Resume);
-            else if (iequals(action, "compare")) m_mipCommand.store(MipCommand::Compare);
-            else if (iequals(action, "smooth")) m_mipCommand.store(MipCommand::Smooth);
-            else if (iequals(action, "blend")) m_mipCommand.store(MipCommand::Blend);
-            else if (iequals(action, "linear")) m_mipCommand.store(MipCommand::Linear);
-            else if (iequals(action, "detail")) {
-                const char* value = strtok_s(nullptr, " \t", &context);
-                if (value && iequals(value, "on")) m_mipCommand.store(MipCommand::DetailOn);
-                else if (value && iequals(value, "off")) m_mipCommand.store(MipCommand::DetailOff);
-                else chat("Usage: /vv mip detail [on|off]");
-            }
             else if (iequals(action, "off")) m_mipCommand.store(MipCommand::Off);
-            else chat("Usage: /vv mip [on|off|status|auto|pause|resume|compare|detail|smooth|blend|linear|color|pair]");
-            return true;
-        }
-
-        if (iequals(sub, "diag"))
-        {
-            const char* action = strtok_s(nullptr, " \t", &context);
-            const bool terrain = action && iequals(action, "terrain");
-            if (action == nullptr || iequals(action, "start") || iequals(action, "textures") || terrain)
-            {
-                if (m_diagnostics.active()) chat("Diagnostic already active. Use /vv diag cancel.");
-                else if (!m_device || !m_core || !m_core->GetInstallPath()) chat("Diagnostic unavailable: no D3D device or install path.");
-                else
-                {
-                    try {
-                        if (terrain) save_lod_diagnostic();
-                        m_diagnostics.start(m_core->GetInstallPath(), m_currentZoneId,
-                            static_cast<unsigned>(m_lodMode), static_cast<unsigned>(m_fogMode), m_drawDistance,
-                            terrain || (action && iequals(action, "textures")));
-                        chat("Diagnostic armed: next 3 frames, up to 1024 draws/frame. Output: logs/VanaView-diag-*.csv");
-                    } catch (...) { m_diagnostics.cancel(); chat("Diagnostic failed: could not allocate capture buffer."); }
-                }
-            }
-            else if (iequals(action, "cancel")) { m_diagnostics.cancel(); chat("Diagnostic cancelled."); }
-            else if (iequals(action, "status"))
-                chat("Diagnostic: %s, %u draws buffered.", m_diagnostics.active() ? "active" : "idle", static_cast<unsigned>(m_diagnostics.size()));
-            else chat("Usage: /vv diag [start|textures|terrain|status|cancel]");
+            else chat("/vv mip on | off | status");
             return true;
         }
 
@@ -629,9 +616,9 @@ public:
             }
             char* end = nullptr;
             const float parsed = std::strtof(value, &end);
-            if (end == value)
+            if (end == value || *end || !std::isfinite(parsed))
             {
-                chat("Usage: /vv distance <1-100> | default");
+                chat("Usage: /vv distance <1-40> | default");
                 return true;
             }
             if (parsed <= 0.0f)
@@ -646,7 +633,7 @@ public:
             m_drawDistance = distance;
             apply_draw_distances();
             save_config();
-            chat("Distance set to %.0f.", static_cast<double>(clamp_float(parsed, 1.0f, kMaxDrawDistance)));
+            chat("Distance set to %.0f.", static_cast<double>(draw_distance_to_slider(distance)));
             return true;
         }
 
@@ -658,15 +645,6 @@ public:
                 print_lod_status();
                 return true;
             }
-            if (std::isdigit(static_cast<unsigned char>(mode[0])) || mode[0] == '.')
-            {
-                m_lodRangeScale = clamp_float(std::strtof(mode, nullptr), kLodRangeMin, kLodRangeMax);
-                m_lodMode = LodMode::Range;
-                const bool ok = apply_lod_mode();
-                save_config();
-                chat(ok ? "LoD range %.2fx." : "LoD range failed. Signature mismatch.", static_cast<double>(m_lodRangeScale));
-                return true;
-            }
             if (iequals(mode, "full") || iequals(mode, "high"))
             {
                 m_lodMode = LodMode::High;
@@ -675,7 +653,7 @@ public:
                 chat(ok ? "LoD mode: full." : "LoD full failed. Signature mismatch.");
                 return true;
             }
-            if (iequals(mode, "default"))
+            if (iequals(mode, "game") || iequals(mode, "default"))
             {
                 m_lodMode = LodMode::Off;
                 m_lodRangeScale = 1.0f;
@@ -684,34 +662,19 @@ public:
                 chat("LoD restored to default.");
                 return true;
             }
-            chat("Usage: /vv lod <scale> | full | default");
+            chat("Usage: /vv lod full | game");
             return true;
         }
 
         if (iequals(sub, "fog"))
         {
             const char* mode = strtok_s(nullptr, " \t", &context);
-            if (mode && iequals(mode, "compare"))
-            {
-                m_fogCompareRequested.store(true);
-                return true;
-            }
             if (mode == nullptr || iequals(mode, "status"))
             {
                 print_fog_status();
                 return true;
             }
-            finish_fog_comparison("fog_changed");
-            if (iequals(mode, "default"))
-            {
-                set_fog_mode(FogMode::DistanceLinked);
-                sync_default_fog_range();
-                restore_fog_state();
-                save_config();
-                chat("Fog mode: distance-linked.");
-                return true;
-            }
-            if (iequals(mode, "distance") || iequals(mode, "linked"))
+            if (iequals(mode, "distance") || iequals(mode, "linked") || iequals(mode, "default"))
             {
                 set_fog_mode(FogMode::DistanceLinked);
                 save_config();
@@ -725,31 +688,7 @@ public:
                 chat("Fog mode: game values.");
                 return true;
             }
-            if (iequals(mode, "custom"))
-            {
-                set_fog_mode(FogMode::Custom);
-                save_config();
-                chat("Fog mode: custom %.1f-%.1f.", static_cast<double>(m_fogStart), static_cast<double>(m_fogEnd));
-                return true;
-            }
-            if (std::isdigit(static_cast<unsigned char>(mode[0])) || mode[0] == '.')
-            {
-                const char* start = mode;
-                const char* end = strtok_s(nullptr, " \t", &context);
-                if (start == nullptr || end == nullptr)
-                {
-                    chat("Usage: /vv fog <start> <end>");
-                    return true;
-                }
-                m_fogStart = clamp_float(std::strtof(start, nullptr), 0.0f, kMaxFogDistance);
-                const float requestedEnd = std::strtof(end, nullptr);
-                m_fogEnd = clamp_float(requestedEnd, m_fogStart + 1.0f, kMaxFogDistance);
-                set_fog_mode(FogMode::Custom);
-                save_config();
-                chat("Fog range set to %.1f-%.1f.", static_cast<double>(m_fogStart), static_cast<double>(m_fogEnd));
-                return true;
-            }
-            chat("Usage: /vv fog <start> <end> | custom | game | distance | default | compare");
+            chat("Usage: /vv fog game | distance | status");
             return true;
         }
 
@@ -759,15 +698,9 @@ public:
 
     void Direct3DBeginScene(bool isRenderingBackBuffer) override
     {
-        m_diagBackBuffer = isRenderingBackBuffer;
-        begin_game_fog_sample(isRenderingBackBuffer);
-    }
+        if (m_terrainGroupPatch.patched && isRenderingBackBuffer)
+            update_terrain_group_zone(get_current_zone());
 
-    void Direct3DEndScene(bool isRenderingBackBuffer) override
-    {
-        m_diagBackBuffer = false;
-        if (isRenderingBackBuffer)
-            finish_game_fog_sample();
     }
 
     void Direct3DPresent(const RECT* pSourceRect, const RECT* pDestRect, HWND hDestWindowOverride, const RGNDATA* pDirtyRegion) override
@@ -777,288 +710,24 @@ public:
         UNREFERENCED_PARAMETER(hDestWindowOverride);
         UNREFERENCED_PARAMETER(pDirtyRegion);
 
-        const auto now = MipmapProfile::Clock::now();
-        const auto mode = m_mipmaps.mode();
-        if (m_mipProfile.active() && mode != MipmapExperiment::Mode::Auto)
-            save_mip_profile("draw_failure");
-        m_mipProfile.present(now, m_currentZoneId,
-            mode == MipmapExperiment::Mode::Off, m_mipmaps.automatic().frame_work());
-
-        if (m_diagnostics.active()) {
-            finish_mip_comparison("diagnostic");
-            finish_fog_comparison("diagnostic");
-        }
-        try {
-            std::string message;
-            if (m_diagnostics.present(message)) chat("%s", message.c_str());
-        } catch (...) { m_diagnostics.cancel(); chat("Diagnostic failed while saving capture."); }
         update_zone_profile();
-        update_mip_comparison(now);
         try {
             m_mipmaps.present(m_device);
         } catch (...) {
-            finish_mip_comparison("cache_failure");
-            save_mip_profile("cache_failure");
             m_mipmaps.stop();
             chat("Automatic mipmaps stopped: could not prepare the texture cache.");
         }
         process_mip_command();
-        if (m_fogComparison.active() || m_fogCompareRequested.load()) update_fog_comparison(now);
         render_window();
-    }
-
-    bool Direct3DSetRenderState(D3DRENDERSTATETYPE state, DWORD* value) override
-    {
-        if (value == nullptr)
-            return false;
-        if (m_applyingForcedFogState)
-            return false;
-
-        if (state == D3DRS_FOGSTART)
-        {
-            m_fogDeviceState.observe(FogDeviceState::Start, *value);
-            capture_original_fog_start(dword_to_float(*value));
-            finish_game_fog_sample_if_ready();
-            if (should_force_fog_state())
-                *value = float_to_dword(m_fogStart);
-        }
-        else if (state == D3DRS_FOGEND)
-        {
-            m_fogDeviceState.observe(FogDeviceState::End, *value);
-            capture_original_fog_end(dword_to_float(*value));
-            finish_game_fog_sample_if_ready();
-            if (should_force_fog_state())
-                *value = float_to_dword(m_fogEnd);
-        }
-        else if (state == D3DRS_FOGVERTEXMODE)
-        {
-            m_fogDeviceState.observe(FogDeviceState::VertexMode, *value);
-            if (should_force_fog_state()) *value = D3DFOG_LINEAR;
-        }
-        else if (state == D3DRS_FOGTABLEMODE)
-        {
-            m_fogDeviceState.observe(FogDeviceState::TableMode, *value);
-            if (should_force_fog_state()) *value = D3DFOG_NONE;
-        }
-        else if (state == D3DRS_RANGEFOGENABLE)
-        {
-            m_fogDeviceState.observe(FogDeviceState::RangeEnable, *value);
-            if (should_force_fog_state()) *value = FALSE;
-        }
-
-        return false;
     }
 
     bool Direct3DDrawPrimitive(D3DPRIMITIVETYPE primitiveType, UINT startVertex, UINT primitiveCount) override
     {
-        apply_fog_state_before_draw(primitiveCount);
-        m_diagnostics.draw(m_device, 0, primitiveType, primitiveCount, m_diagBackBuffer);
-        return !m_diagnostics.active() && m_mipmaps.draw(m_device, primitiveType, startVertex, primitiveCount);
-    }
-
-    bool Direct3DDrawIndexedPrimitive(D3DPRIMITIVETYPE primitiveType, UINT minIndex, UINT numVertices, UINT startIndex, UINT primCount) override
-    {
-        UNREFERENCED_PARAMETER(primitiveType);
-        UNREFERENCED_PARAMETER(minIndex);
-        UNREFERENCED_PARAMETER(numVertices);
-        UNREFERENCED_PARAMETER(startIndex);
-        UNREFERENCED_PARAMETER(primCount);
-
-        apply_fog_state_before_draw(primCount);
-        m_diagnostics.draw(m_device, 1, primitiveType, primCount, m_diagBackBuffer);
-        return false;
-    }
-
-    bool Direct3DDrawPrimitiveUP(D3DPRIMITIVETYPE primitiveType, UINT primitiveCount, CONST void* vertexStreamZeroData, UINT vertexStreamZeroStride) override
-    {
-        UNREFERENCED_PARAMETER(primitiveType);
-        UNREFERENCED_PARAMETER(primitiveCount);
-        UNREFERENCED_PARAMETER(vertexStreamZeroData);
-        UNREFERENCED_PARAMETER(vertexStreamZeroStride);
-
-        apply_fog_state_before_draw(primitiveCount);
-        m_diagnostics.draw(m_device, 2, primitiveType, primitiveCount, m_diagBackBuffer);
-        return false;
-    }
-
-    bool Direct3DDrawIndexedPrimitiveUP(D3DPRIMITIVETYPE primitiveType, UINT minVertexIndex, UINT numVertexIndices, UINT primitiveCount, CONST void* indexData, D3DFORMAT indexDataFormat, CONST void* vertexStreamZeroData, UINT vertexStreamZeroStride) override
-    {
-        UNREFERENCED_PARAMETER(primitiveType);
-        UNREFERENCED_PARAMETER(minVertexIndex);
-        UNREFERENCED_PARAMETER(numVertexIndices);
-        UNREFERENCED_PARAMETER(primitiveCount);
-        UNREFERENCED_PARAMETER(indexData);
-        UNREFERENCED_PARAMETER(indexDataFormat);
-        UNREFERENCED_PARAMETER(vertexStreamZeroData);
-        UNREFERENCED_PARAMETER(vertexStreamZeroStride);
-
-        apply_fog_state_before_draw(primitiveCount);
-        m_diagnostics.draw(m_device, 3, primitiveType, primitiveCount, m_diagBackBuffer);
-        return false;
+        return m_mipmaps.draw(m_device, primitiveType, startVertex, primitiveCount);
     }
 
 private:
-    enum class MipCommand
-    {
-        None, Color, Pair, Auto, On, Off, Status, Pause, Resume, Compare, DetailOn, DetailOff, Smooth, Blend, Linear
-    };
-
-    FogComparison::Settings fog_comparison_settings() const
-    {
-        return {m_currentZoneId, static_cast<unsigned>(m_lodMode), static_cast<unsigned>(m_fogMode),
-            m_drawDistance, m_lodRangeScale};
-    }
-
-    void finish_fog_comparison(const char* reason)
-    {
-        if (!m_fogComparison.active()) return;
-        m_fogComparison.reset();
-        if (m_fogComparePausedMips) {
-            m_mipmaps.set_paused(false);
-            m_fogComparePausedMips = false;
-        }
-        if (m_fogComparison.done()) {
-            const auto& legacy = m_fogComparison.result(false);
-            const auto& optimized = m_fogComparison.result(true);
-            chat("Fog A/B | legacy %.1f FPS (1%% low %.1f) | optimized %.1f FPS (1%% low %.1f)",
-                legacy.fps(), m_fogComparison.low_fps(false), optimized.fps(), m_fogComparison.low_fps(true));
-            chat("Fog A/B | writes/frame %.0f legacy, %.0f optimized",
-                legacy.writes_per_frame(), optimized.writes_per_frame());
-        } else {
-            chat("Fog comparison stopped (%s).", reason);
-        }
-        try {
-            const auto* path = m_core ? m_core->GetInstallPath() : nullptr;
-            if (path) {
-                const auto message = m_fogComparison.save(path, reason);
-                if (!message.empty()) chat("%s", message.c_str());
-            }
-        } catch (...) {
-            chat("Fog comparison could not be saved.");
-        }
-    }
-
-    void update_fog_comparison(FogComparison::Clock::time_point now)
-    {
-        const bool requested = m_fogCompareRequested.exchange(false);
-        if (m_fogComparison.active()) {
-            if (requested) { finish_fog_comparison("manual"); return; }
-            if (!m_fogComparison.matches(fog_comparison_settings()) || m_windowOpen) {
-                finish_fog_comparison("settings_changed");
-                return;
-            }
-            if (m_fogComparison.expired(now)) { finish_fog_comparison("timeout"); return; }
-            m_fogComparison.present(now);
-            if (m_fogComparison.done()) finish_fog_comparison("complete");
-            return;
-        }
-        if (!requested) return;
-        if (!m_device || !m_core || !m_core->GetInstallPath() || !m_currentZoneId || !should_force_fog_state()) {
-            chat("Fog comparison requires a loaded zone and Game or Custom fog.");
-            return;
-        }
-        if (m_diagnostics.active() || m_mipComparison.active() || m_windowOpen ||
-            m_mipmaps.mode() == MipmapExperiment::Mode::Color || m_mipmaps.mode() == MipmapExperiment::Mode::Pair) {
-            chat("Close the VanaView window and stop other render tests before comparing fog.");
-            return;
-        }
-        if (m_mipmaps.mode() == MipmapExperiment::Mode::Auto && !m_mipmaps.paused())
-            m_fogComparePausedMips = m_mipmaps.set_paused(true);
-        m_fogComparison.start(now, fog_comparison_settings());
-        chat("Fog comparison started (legacy vs optimized). Keep the same view until results appear.");
-    }
-
-    void finish_mip_comparison(const char* reason)
-    {
-        if (!m_mipComparison.active()) return;
-        m_mipmaps.set_cache_only(false);
-        m_mipmaps.set_paused(m_mipComparison.was_paused());
-        if (m_mipComparison.done()) {
-            const auto& reference = m_mipComparison.result(true);
-            const auto& active = m_mipComparison.result(false);
-            chat("Mips A/B | paused %.1f fps | auto %.1f fps | substituted draws=%llu",
-                 reference.fps(), active.fps(), active.draws);
-            if (!active.draws) chat("No substitutions in this view. Compare again where the mipmaps are visible.");
-        }
-        try {
-            const auto* path = m_core ? m_core->GetInstallPath() : nullptr;
-            if (path) {
-                const auto message = m_mipComparison.save(path, reason);
-                if (!message.empty()) chat("%s", message.c_str());
-            }
-        } catch (...) {
-            chat("Mipmap comparison could not be saved.");
-        }
-        m_mipComparison.reset();
-    }
-
-    void update_mip_comparison(MipmapProfile::Clock::time_point now)
-    {
-        if (!m_mipComparison.active()) return;
-        if (m_mipmaps.mode() != MipmapExperiment::Mode::Auto ||
-            m_mipmaps.automatic().count() != m_mipComparison.ready()) {
-            finish_mip_comparison("cache_changed");
-            return;
-        }
-        m_mipComparison.present(now, m_mipmaps.automatic().frame_work());
-        if (m_mipComparison.done()) finish_mip_comparison("complete");
-        else m_mipmaps.set_paused(m_mipComparison.paused());
-    }
-
-    void start_mip_comparison()
-    {
-        if (m_mipComparison.active()) {
-            chat("Mipmap comparison already running.");
-            return;
-        }
-        const auto& cache = m_mipmaps.automatic();
-        if (m_mipmaps.mode() != MipmapExperiment::Mode::Auto || cache.count() == 0 || cache.pending()) {
-            chat("Enable /vv mip auto and wait for ready > 0 and pending = 0.");
-            return;
-        }
-        if (m_diagnostics.active()) {
-            chat("Wait for the render diagnostic to finish.");
-            return;
-        }
-        if (m_mipmaps.detail_enabled()) {
-            chat("Use /vv mip detail off for the paused versus color comparison.");
-            return;
-        }
-        if (m_mipmaps.smoothing()) {
-            chat("Toggle /vv mip smooth off for the paused versus color comparison.");
-            return;
-        }
-        if (m_mipmaps.blend_enabled()) {
-            chat("Toggle /vv mip blend off for the paused versus color comparison.");
-            return;
-        }
-        if (m_mipmaps.linear_enabled()) {
-            chat("Toggle /vv mip linear off for the paused versus color comparison.");
-            return;
-        }
-        save_mip_profile("compare");
-        m_mipmaps.set_cache_only(true);
-        m_mipComparison.start(MipmapProfile::Clock::now(), m_mipmaps.paused(), m_currentZoneId, cache.count());
-        m_mipmaps.set_paused(true);
-        chat("Mipmap comparison started. Keep the camera still until Mips A/B appears.");
-    }
-
-    void save_mip_profile(const char* reason)
-    {
-        if (!m_mipProfile.active()) return;
-        try {
-            const auto* path = m_core ? m_core->GetInstallPath() : nullptr;
-            if (!path) {
-                m_mipProfile.reset();
-                return;
-            }
-            const auto message = m_mipProfile.save(path, reason);
-            if (!message.empty()) chat("%s", message.c_str());
-        } catch (...) {
-            m_mipProfile.reset();
-            chat("Mipmap profile could not be saved.");
-        }
-    }
+    enum class MipCommand { None, On, Off, Status };
 
     void start_ground_mipmaps()
     {
@@ -1082,175 +751,43 @@ private:
     void process_mip_command()
     {
         const auto command = m_mipCommand.exchange(MipCommand::None);
-        if (command != MipCommand::None && command != MipCommand::Status)
-            finish_fog_comparison("mipmap_changed");
         if (m_device && std::exchange(m_mipStartupPending, false) && m_mipEnabled &&
-            command != MipCommand::On && command != MipCommand::Off && command != MipCommand::Auto &&
-            command != MipCommand::Color && command != MipCommand::Pair) {
+            command != MipCommand::On && command != MipCommand::Off)
             start_ground_mipmaps();
-        }
         if (command == MipCommand::None) return;
         if (command == MipCommand::On) {
-            finish_mip_comparison("ground_mips_on");
-            save_mip_profile("ground_mips_on");
             save_mip_preference(true);
             if (m_device) start_ground_mipmaps();
             else m_mipStartupPending = true;
             return;
         }
-        if (command == MipCommand::Smooth || command == MipCommand::Blend || command == MipCommand::Linear) {
-            const bool smooth = command == MipCommand::Smooth;
-            const bool linear = command == MipCommand::Linear;
-            const char* name = linear ? "linear" : smooth ? "smooth" : "blend";
-            const char* reason = linear ? "linear_mode" : smooth ? "smooth_mode" : "blend_mode";
-            finish_mip_comparison(reason);
-            save_mip_profile(reason);
-            if (m_mipmaps.mode() == MipmapExperiment::Mode::Off && m_device) {
-                try {
-                    std::string message;
-                    if (!m_mipmaps.start(m_device, {}, MipmapExperiment::Mode::Auto, message)) {
-                        chat("%s", message.c_str());
-                        return;
-                    }
-                    m_mipmaps.set_detail(true);
-                    if (linear) m_mipmaps.set_blend(true);
-                    chat("Automatic color and detail mipmaps enabled.");
-                } catch (...) {
-                    m_mipmaps.stop();
-                    chat("Mips %s could not initialize.", name);
-                    return;
-                }
-            }
-            bool enable, changed;
-            if (linear) {
-                enable = !m_mipmaps.linear_enabled();
-                changed = m_mipmaps.set_linear(m_device, enable);
-            } else if (smooth) {
-                enable = !m_mipmaps.smoothing();
-                changed = m_mipmaps.set_smoothing(m_device, enable);
-            } else {
-                enable = !m_mipmaps.blend_enabled();
-                changed = m_mipmaps.set_blend(enable);
-            }
-            if (changed) {
-                chat("Mips %s %s. Use /vv mip %s again to compare.", name, enable ? "on" : "off", name);
-            } else {
-                if (smooth) chat("Mips smooth requires auto mode and device support for texture LOD bias.");
-                else if (linear) chat("Mips linear requires auto mode and device support for linear minification.");
-                else chat("Mips blend requires auto mode.");
-            }
-            return;
-        }
-        if (command == MipCommand::Compare) {
-            start_mip_comparison();
-            return;
-        }
-        if (command == MipCommand::DetailOn || command == MipCommand::DetailOff) {
-            finish_mip_comparison("detail_mode");
-            if (!m_mipmaps.set_detail(command == MipCommand::DetailOn)) {
-                chat("Enable /vv mip auto first.");
-                return;
-            }
-            save_mip_profile("detail_mode");
-        }
-        if (command == MipCommand::Pause || command == MipCommand::Resume) {
-            finish_mip_comparison("manual");
-            if (!m_mipmaps.set_paused(command == MipCommand::Pause)) {
-                chat("Enable /vv mip auto first.");
-                return;
-            }
-            if (command == MipCommand::Pause) save_mip_profile("pause");
-        }
         if (command == MipCommand::Off) {
-            finish_mip_comparison("off");
-            save_mip_profile("off");
             m_mipmaps.stop();
             save_mip_preference(false);
-        }
-        if (command == MipCommand::Color || command == MipCommand::Pair || command == MipCommand::Auto) {
-            try {
-                std::string message;
-                finish_mip_comparison("switch_mode");
-                save_mip_profile("switch_mode");
-                if (command == MipCommand::Auto && m_device) {
-                    if (m_mipmaps.start(m_device, {}, MipmapExperiment::Mode::Auto, message))
-                        m_mipProfile.start();
-                } else if (m_device && m_core && m_core->GetInstallPath()) {
-                    const auto mode = command == MipCommand::Color ? MipmapExperiment::Mode::Color : MipmapExperiment::Mode::Pair;
-                    const auto directory = std::filesystem::path(m_core->GetInstallPath()) / "plugins" / "VanaView-mips";
-                    m_mipmaps.start(m_device, directory, mode, message);
-                } else {
-                    message = "Mipmap experiment unavailable: no D3D device or install path.";
-                }
-                chat("%s", message.c_str());
-            } catch (...) {
-                m_mipmaps.stop();
-                chat("Mipmap experiment could not initialize.");
-            }
-        }
-        const auto mode = m_mipmaps.mode();
-        const auto& stats = m_mipmaps.stats();
-        if (mode == MipmapExperiment::Mode::Auto) {
-            const auto& cache = m_mipmaps.automatic();
-            const auto& work = cache.stats();
-            chat("Mips %s | frames=%llu color=%llu ready=%u pending=%u KiB=%u/%u errors=%llu",
-                m_mipmaps.paused() ? "paused" : "auto", stats.frames, stats.color,
-                static_cast<unsigned>(cache.count()), static_cast<unsigned>(cache.pending()),
-                static_cast<unsigned>(cache.bytes() / 1024), static_cast<unsigned>(AutoColorMipmaps::ReadyBudget / 1024),
-                stats.failures + work.errors);
-            chat("Mips cache | built=%llu evicted=%llu invalidated=%llu rejected=%llu checks=%u peak=%llu us",
-                work.generated, work.evicted, work.invalidated, work.rejected, work.checks, work.peakUs);
-            chat("Mips peaks (us) | read=%llu build=%llu create=%llu copy=%llu first draw=%llu paced=%llu",
-                work.snapshotUs, work.buildUs, work.createUs, work.uploadUs, work.firstUseUs, work.paced);
-            if (work.diskHits || work.diskMisses || work.diskErrors)
-                chat("Mips disk | limit=%u MiB hits=%llu misses=%llu saved=%llu errors=%llu peak=%llu us",
-                    static_cast<unsigned>(MipmapDiskCache::Budget / (1024 * 1024)),
-                    work.diskHits, work.diskMisses, work.diskWrites, work.diskErrors, work.diskUs);
-            if (cache.pending() || work.overlapFrames)
-                chat("Mips queue | waiting=%u preparing=%u uploading=%u overlapFrames=%llu",
-                    static_cast<unsigned>(cache.waiting()), static_cast<unsigned>(cache.preparing()),
-                    static_cast<unsigned>(cache.uploading()), work.overlapFrames);
-            chat("Mips detail %s | detailReady=%u detailDraws=%llu",
-                m_mipmaps.detail_enabled() ? "on" : "off", static_cast<unsigned>(cache.detail_count()), stats.detail);
-            if (m_mipmaps.smoothing() || stats.smooth)
-                chat("Mips smooth %s | smoothDraws=%llu", m_mipmaps.smoothing() ? "on" : "off", stats.smooth);
-            if (m_mipmaps.blend_enabled() || stats.blend)
-                chat("Mips blend %s | blendDraws=%llu blendDetail=%llu",
-                    m_mipmaps.blend_enabled() ? "on" : "off", stats.blend, stats.blendDetail);
-            if (m_mipmaps.linear_enabled() || stats.linear)
-                chat("Mips linear %s | linearDraws=%llu linearDetail=%llu",
-                    m_mipmaps.linear_enabled() ? "on" : "off", stats.linear, stats.linearDetail);
             return;
         }
-        chat("Mips %s | pairs=%u frames=%llu color=%llu detail=%llu checks=%llu errors=%llu",
-            mode == MipmapExperiment::Mode::Color ? "color" : mode == MipmapExperiment::Mode::Pair ? "pair" : "off",
-            static_cast<unsigned>(m_mipmaps.pairs()), stats.frames, stats.color, stats.detail, stats.checks, stats.failures);
+        chat("Terrain mipmaps %s (%u cached textures).", m_mipEnabled ? "on" : "off",
+            static_cast<unsigned>(m_mipmaps.automatic().count()));
     }
 
     enum class FogMode : int
     {
         DistanceLinked = 0,
-        Custom = 1,
         Game = 2,
     };
 
     void print_help()
     {
+        chat("/vv proprange <1-4> | off | status");
+        print_terrain_group_help();
         chat("/vv opens the configuration window");
-        chat("/vv distance <1-100> | default");
-        chat("/vv lod <scale> | full | default");
-        chat("/vv fog <start> <end> | custom | game | distance | default");
-        chat("/vv fog compare - compare legacy and optimized fog writes");
+        chat("/vv distance <1-40> | default");
+        chat("/vv lod full | game");
+        chat("/vv fog game | distance | status");
         chat("/vv zone on | off | status");
         chat("/vv reset");
         chat("/vv status");
-        chat("/vv diag [start|textures|terrain|status|cancel] - capture 3 frames of texture diagnostics");
         chat("/vv mip [on|off|status] - ground mipmaps and startup preference");
-        chat("/vv mip [auto|pause|resume|compare|color|pair] - mipmap testing");
-        chat("/vv mip detail [on|off] - compare color and detail within auto");
-        chat("/vv mip smooth - toggle coarser color mips for flicker comparison");
-        chat("/vv mip blend - toggle mipmap reuse in the terrain blend pass");
-        chat("/vv mip linear - toggle linear minification for replaced terrain textures");
     }
 
     void print_status()
@@ -1280,45 +817,25 @@ private:
 
     FogMode parse_fog_mode(const int value) const
     {
-        if (value == static_cast<int>(FogMode::Custom))
-            return FogMode::Custom;
-        if (value == static_cast<int>(FogMode::Game))
-            return FogMode::Game;
-        return FogMode::DistanceLinked;
-    }
-
-    bool should_force_fog_state() const
-    {
-        return m_fogMode == FogMode::Custom || m_fogMode == FogMode::Game;
+        // Legacy Custom (1) profiles now use the native weather calculation.
+        return value == 0 ? FogMode::DistanceLinked : FogMode::Game;
     }
 
     void set_fog_mode(const FogMode mode)
     {
-        if (m_fogMode == mode)
-            return;
-
-        finish_game_fog_sample();
         m_fogMode = mode;
         apply_active_fog_mode();
     }
 
     void apply_active_fog_mode()
     {
-        if (m_fogMode == FogMode::DistanceLinked)
-        {
-            reset_game_fog_sample(false);
-            restore_fog_state();
-            return;
+        ::InterlockedExchange(&FogDistanceScale::enabled, 0);
+        if (m_fogMode == FogMode::Game) {
+            if (install_native_fog_scale())
+                ::InterlockedExchange(&FogDistanceScale::enabled, 1);
+            else
+                chat("Native fog unavailable for this client. Fog follows draw distance.");
         }
-        if (m_fogMode == FogMode::Game)
-        {
-            reset_game_fog_sample(true);
-            apply_forced_fog_state();
-            return;
-        }
-
-        reset_game_fog_sample(false);
-        apply_forced_fog_state();
     }
 
     void show_help_marker(IGuiManager* gui, const char* text)
@@ -1386,39 +903,21 @@ private:
 
         auto* gui = m_core->GetGuiManager();
         const int themeCount = push_theme(gui);
-        gui->SetNextWindowSize(ImVec2(455.0f, 420.0f), ImGuiCond_Always);
+        const float scale = clamp_float(gui->GetIO().DisplaySize.y / 1080.0f, 1.0f, 2.0f);
+        gui->PushFont(nullptr, gui->GetStyle().FontSizeBase * scale);
+        gui->SetNextWindowSize(ImVec2(450.0f * scale, 0.0f), ImGuiCond_Always);
 
         bool open = m_windowOpen;
-        if (gui->Begin("VanaView", &open, ImGuiWindowFlags_NoResize))
+        if (gui->Begin("VanaView", &open, ImGuiWindowFlags_AlwaysAutoResize))
         {
-            gui->Text("Visual distance and LoD");
-            gui->Separator();
-
             bool changed = false;
-
-            bool useZoneProfiles = m_useZoneProfiles;
-            if (gui->Checkbox("Use zone profiles", &useZoneProfiles))
-            {
-                set_zone_profiles_enabled(useZoneProfiles);
-                changed = false;
-            }
-            show_help_marker(gui, kZoneProfilesHelp);
-            gui->SameLine(0.0f, 12.0f);
             if (m_useZoneProfiles)
-            {
-                if (m_activeZoneHasProfile)
-                    gui->TextDisabled("| Profile: Zone %u", static_cast<unsigned int>(m_currentZoneId));
-                else
-                    gui->TextDisabled("| Profile: Global fallback (zone %u)", static_cast<unsigned int>(m_currentZoneId));
-            }
-            else
-            {
-                gui->TextDisabled("| Profile: Global");
-            }
-
-            float distance = draw_distance_to_slider(m_drawDistance);
-            gui->SetNextItemWidth(260.0f);
-            if (gui->SliderFloat("Distance", &distance, 1.0f, kMaxDrawDistance, "%.0f"))
+                gui->TextDisabled("Zone %u (%s)", unsigned(m_currentZoneId),
+                    m_activeZoneHasProfile ? "zone profile" : "global fallback");
+            gui->Text("Visibility");
+            int distance = static_cast<int>(std::lround(draw_distance_to_slider(m_drawDistance)));
+            gui->SetNextItemWidth(260.0f * scale);
+            if (gui->SliderInt("Draw distance", &distance, 1, kDistanceSliderMax))
             {
                 m_drawDistance = slider_to_draw_distance(distance);
                 apply_draw_distances();
@@ -1426,13 +925,21 @@ private:
             }
             show_help_marker(gui, kDistanceHelp);
 
+            int range = static_cast<int>(std::lround(m_propRange * 4));
+            char rangeLabel[24];
+            std::snprintf(rangeLabel, sizeof(rangeLabel), "%.2fx", double(m_propRange));
+            gui->SetNextItemWidth(260.0f * scale);
+            if (gui->SliderInt("Object range", &range, 4, 16, rangeLabel, ImGuiSliderFlags_NoInput))
+                save_prop_range(range * 0.25f);
+            show_help_marker(gui, "Extends the distance of map objects such as trees. Higher values can reduce FPS.");
+            gui->TextDisabled("Higher object range can lower FPS.");
             gui->Separator();
             gui->Text("Map LoD");
             show_help_marker(gui, kLodModeHelp);
 
             int lodMode = static_cast<int>(m_lodMode);
             bool lodChanged = false;
-            lodChanged = gui->RadioButton("Range##lod", &lodMode, static_cast<int>(LodMode::Range)) || lodChanged;
+            lodChanged = gui->RadioButton("Game##lod", &lodMode, static_cast<int>(LodMode::Off));
             gui->SameLine();
             lodChanged = gui->RadioButton("Full##lod", &lodMode, static_cast<int>(LodMode::High)) || lodChanged;
             if (lodChanged)
@@ -1442,71 +949,46 @@ private:
                 changed = true;
             }
 
-            float lodScale = m_lodRangeScale;
-            if (m_lodMode == LodMode::High)
-            {
-                char lodOverlay[32]{};
-                std::snprintf(lodOverlay, sizeof(lodOverlay), "%.2fx", static_cast<double>(lodScale));
-                const float lodProgress = clamp_float((lodScale - kLodRangeMin) / (kLodRangeMax - kLodRangeMin), 0.0f, 1.0f);
-                gui->PushStyleVar(ImGuiStyleVar_Alpha, 0.45f);
-                gui->ProgressBar(lodProgress, ImVec2(260.0f, 0.0f), lodOverlay);
-                gui->SameLine();
-                gui->Text("LoD range");
-                gui->PopStyleVar();
-                show_help_marker(gui, kLodRangeDisabledHelp);
-            }
-            else
-            {
-                gui->SetNextItemWidth(260.0f);
-                if (gui->SliderFloat("LoD range", &lodScale, kLodRangeMin, kLodRangeMax, "%.2fx"))
-                {
-                    m_lodRangeScale = clamp_float(lodScale, kLodRangeMin, kLodRangeMax);
-                    if (m_lodMode == LodMode::Range)
-                        apply_lod_mode();
-                    changed = true;
-                }
-                show_help_marker(gui, kLodRangeHelp);
-            }
-
             gui->Separator();
             gui->Text("Fog");
             show_help_marker(gui, kFogModeHelp);
 
-            int fogMode = static_cast<int>(m_fogMode);
-            bool fogModeChanged = false;
-            fogModeChanged = gui->RadioButton("Distance##fog", &fogMode, static_cast<int>(FogMode::DistanceLinked)) || fogModeChanged;
-            gui->SameLine();
-            fogModeChanged = gui->RadioButton("Game##fog", &fogMode, static_cast<int>(FogMode::Game)) || fogModeChanged;
-            gui->SameLine();
-            fogModeChanged = gui->RadioButton("Custom##fog", &fogMode, static_cast<int>(FogMode::Custom)) || fogModeChanged;
-            if (fogModeChanged)
-            {
-                set_fog_mode(parse_fog_mode(fogMode));
+            if (gui->RadioButton("Game##fog", m_fogMode == FogMode::Game)) {
+                set_fog_mode(FogMode::Game);
                 changed = true;
             }
-
-            float fogStart = m_fogStart;
-            float fogEnd = m_fogEnd;
-            gui->SetNextItemWidth(260.0f);
-            const bool fogStartSliderChanged = gui->SliderFloat("Fog start", &fogStart, 0.0f, kMaxFogDistance, "%.0f");
-            gui->SetNextItemWidth(260.0f);
-            const bool fogEndSliderChanged = gui->SliderFloat("Fog end", &fogEnd, 1.0f, kMaxFogDistance, "%.0f");
-            if (fogStartSliderChanged || fogEndSliderChanged)
-            {
-                m_fogStart = clamp_float(fogStart, 0.0f, kMaxFogDistance);
-                m_fogEnd = clamp_float(fogEnd, m_fogStart + 1.0f, kMaxFogDistance);
-                set_fog_mode(FogMode::Custom);
+            gui->SameLine();
+            if (gui->RadioButton("Distance##fog", m_fogMode == FogMode::DistanceLinked)) {
+                set_fog_mode(FogMode::DistanceLinked);
                 changed = true;
             }
 
             gui->Separator();
+            gui->Text("Terrain");
+            bool groups = m_terrainGroupsEnabled;
+            if (gui->Checkbox("Extend distant terrain", &groups))
+                set_terrain_groups_enabled(groups);
+            show_help_marker(gui, "Keeps distant terrain visible when turning the camera on supported maps.");
             bool terrainMipmaps = m_mipEnabled;
             if (gui->Checkbox("Terrain mipmaps", &terrainMipmaps))
                 m_mipCommand.store(terrainMipmaps ? MipCommand::On : MipCommand::Off);
             show_help_marker(gui, "Reduces distant terrain shimmer. This setting applies immediately and is saved for all zones.");
 
             gui->Separator();
-            if (gui->Button("Default", ImVec2(90.0f, 0.0f)))
+            if (gui->CollapsingHeader("Zone settings")) {
+                bool profiles = m_useZoneProfiles;
+                if (gui->Checkbox("Use zone profiles", &profiles))
+                    set_zone_profiles_enabled(profiles);
+                show_help_marker(gui, kZoneProfilesHelp);
+                const uint16_t zone = get_current_zone();
+                if (zone) {
+                    update_terrain_group_zone(zone);
+                    bool excluded = m_terrainGroupZoneExcluded;
+                    if (gui->Checkbox("Disable terrain extension here", &excluded))
+                        handle_terrain_groups("zone", excluded ? "off" : "default");
+                }
+            }
+            if (gui->Button("Restore defaults", ImVec2(0.0f, 0.0f)))
             {
                 restore_default_runtime();
                 changed = true;
@@ -1523,6 +1005,7 @@ private:
                 save_config();
         }
         gui->End();
+        gui->PopFont();
 
         m_windowOpen = open;
         if (themeCount > 0)
@@ -1531,17 +1014,10 @@ private:
 
     void print_fog_status()
     {
-        if (m_fogMode == FogMode::DistanceLinked)
-        {
-            chat("Fog: distance-linked %.1f-%.1f", static_cast<double>(m_fogStart), static_cast<double>(m_fogEnd));
-            return;
-        }
-        if (m_fogMode == FogMode::Game)
-        {
-            chat("Fog: game %.1f-%.1f", static_cast<double>(m_fogStart), static_cast<double>(m_fogEnd));
-            return;
-        }
-        chat("Fog: custom %.1f-%.1f", static_cast<double>(m_fogStart), static_cast<double>(m_fogEnd));
+        if (m_fogMode == FogMode::Game && !FogDistanceScale::enabled)
+            chat("Game fog unavailable. Fog follows draw distance.");
+        else
+            chat("Fog mode: %s.", m_fogMode == FogMode::Game ? "Game" : "Distance");
     }
 
     void chat(const char* format, ...)
@@ -1591,18 +1067,16 @@ private:
 
     void load_global_profile(const int configVersion)
     {
-        m_drawDistance = clamp_float(read_profile_float("draw", "distance", read_profile_float("draw", "world", default_draw_distance())), 1.0f, kMaxDrawDistance);
+        m_drawDistance = clamp_float(read_profile_float("draw", "distance", read_profile_float("draw", "world", default_draw_distance())), 1.0f, slider_to_draw_distance(kDistanceSliderMax));
         if (configVersion < 8)
             m_drawDistance = default_draw_distance();
         m_lodMode = static_cast<LodMode>(::GetPrivateProfileIntA("lod", "mode", static_cast<int>(LodMode::High), m_configPath));
         m_lodRangeScale = clamp_float(read_profile_float("lod", "range_scale", 1.0f), kLodRangeMin, kLodRangeMax);
         const int rawFogMode = ::GetPrivateProfileIntA("fog", "mode", static_cast<int>(FogMode::Game), m_configPath);
         m_fogMode = parse_fog_mode(rawFogMode);
-        m_fogStart = clamp_float(read_profile_float("fog", "start", kDefaultFogStart), 0.0f, kMaxFogDistance);
-        m_fogEnd = clamp_float(read_profile_float("fog", "end", kDefaultFogEnd), m_fogStart + 1.0f, kMaxFogDistance);
 
-        if (m_lodMode != LodMode::Off && m_lodMode != LodMode::High && m_lodMode != LodMode::Range)
-            m_lodMode = LodMode::Range;
+        if (m_lodMode != LodMode::High)
+            m_lodMode = LodMode::Off;
     }
 
     void save_config(const bool createZoneProfile = true)
@@ -1636,8 +1110,6 @@ private:
         char mode[16]{};
         std::snprintf(mode, sizeof(mode), "%d", static_cast<int>(m_fogMode));
         ::WritePrivateProfileStringA("fog", "mode", mode, m_configPath);
-        write_profile_float("fog", "start", m_fogStart);
-        write_profile_float("fog", "end", m_fogEnd);
     }
 
     bool profile_section_exists(const char* section) const
@@ -1658,15 +1130,13 @@ private:
         if (!profile_section_exists(section))
             return false;
 
-        m_drawDistance = clamp_float(read_profile_float(section, "distance", m_drawDistance), 1.0f, kMaxDrawDistance);
-        m_lodMode = static_cast<LodMode>(::GetPrivateProfileIntA(section, "lod_mode", static_cast<int>(m_lodMode == LodMode::Off ? LodMode::Range : m_lodMode), m_configPath));
+        m_drawDistance = clamp_float(read_profile_float(section, "distance", m_drawDistance), 1.0f, slider_to_draw_distance(kDistanceSliderMax));
+        m_lodMode = static_cast<LodMode>(::GetPrivateProfileIntA(section, "lod_mode", static_cast<int>(m_lodMode), m_configPath));
         m_lodRangeScale = clamp_float(read_profile_float(section, "lod_range", m_lodRangeScale), kLodRangeMin, kLodRangeMax);
         const int rawFogMode = ::GetPrivateProfileIntA(section, "fog_mode", static_cast<int>(m_fogMode), m_configPath);
         m_fogMode = parse_fog_mode(rawFogMode);
-        m_fogStart = clamp_float(read_profile_float(section, "fog_start", m_fogStart), 0.0f, kMaxFogDistance);
-        m_fogEnd = clamp_float(read_profile_float(section, "fog_end", m_fogEnd), m_fogStart + 1.0f, kMaxFogDistance);
-        if (m_lodMode != LodMode::Off && m_lodMode != LodMode::High && m_lodMode != LodMode::Range)
-            m_lodMode = LodMode::Range;
+        if (m_lodMode != LodMode::High)
+            m_lodMode = LodMode::Off;
         return true;
     }
 
@@ -1682,8 +1152,6 @@ private:
         char fogMode[16]{};
         std::snprintf(fogMode, sizeof(fogMode), "%d", static_cast<int>(m_fogMode));
         ::WritePrivateProfileStringA(section, "fog_mode", fogMode, m_configPath);
-        write_profile_float(section, "fog_start", m_fogStart);
-        write_profile_float(section, "fog_end", m_fogEnd);
     }
 
     void reset_config_to_defaults()
@@ -1694,8 +1162,6 @@ private:
         m_lodMode = LodMode::High;
         m_lodRangeScale = 1.0f;
         m_fogMode = FogMode::Game;
-        m_fogStart = kDefaultFogStart;
-        m_fogEnd = kDefaultFogEnd;
     }
 
     void cleanup_old_config_sections()
@@ -1793,131 +1259,52 @@ private:
         if (!m_originalDrawCaptured)
             return;
 
-        m_drawDistance = clamp_float(m_originalWorldDistance, 1.0f, kMaxDrawDistance);
+        m_drawDistance = clamp_float(m_originalWorldDistance, 1.0f, slider_to_draw_distance(kDistanceSliderMax));
     }
 
-    void capture_original_fog_start(const float value)
+    bool install_native_fog_scale()
     {
-        if (value < 0.0f || value > 100000.0f)
-            return;
-
-        m_originalFogStart = clamp_float(value, 0.0f, kMaxFogDistance);
-        m_originalFogStartCaptured = true;
-        if (m_gameFogSampling && m_fogMode == FogMode::Game)
-        {
-            m_fogStart = m_originalFogStart;
-            m_gameFogSawStart = true;
-            if (m_gameFogSawEnd)
-                m_fogEnd = clamp_float(m_fogEnd, m_fogStart + 1.0f, kMaxFogDistance);
-            return;
+        if (m_fogScaleWorld.patched && m_fogScaleEntity.patched) return true;
+        if (!capture_original_draw_distances()) return false;
+        FogDistanceScale::Sites sites{};
+        const uint8_t signature[] = {0x8b,0xc1,0x48,0x74,0x08,0xd8,0x0d};
+        const auto found = find_bytes(m_ffxiMainBase, m_ffxiMainSize, signature, sizeof(signature));
+        if (found < m_ffxiMainBase + 0x200) return false;
+        std::array<uint8_t, 0x213> code{};
+        if (!safe_read(found - 0x200, code) ||
+            !FogDistanceScale::locate(code.data(), code.size(), found - 0x200, sites)) return false;
+        uint32_t world = 0, entity = 0;
+        if (!safe_read(sites.world + 2, world) || !safe_read(sites.entity + 2, entity) ||
+            world != m_worldDistanceAddress || entity != m_entityDistanceAddress) return false;
+        FogDistanceScale::worldAddress = world;
+        FogDistanceScale::entityAddress = entity;
+        FogDistanceScale::nativeWorld = m_originalWorldDistance;
+        FogDistanceScale::nativeEntity = m_originalEntityDistance;
+        FogDistanceScale::worldReturn = sites.world + 6;
+        FogDistanceScale::entityReturn = sites.entity + 6;
+        FogDistanceScale::fogReturn0 = sites.fogReturns[0];
+        FogDistanceScale::fogReturn1 = sites.fogReturns[1];
+        FogDistanceScale::fogReturn2 = sites.fogReturns[2];
+        if (!write_jump_patch(m_fogScaleWorld, sites.world,
+                reinterpret_cast<void*>(&FogDistanceScale::world), 6) ||
+            !write_jump_patch(m_fogScaleEntity, sites.entity,
+                reinterpret_cast<void*>(&FogDistanceScale::entity), 6)) {
+            restore_patch(m_fogScaleWorld);
+            restore_patch(m_fogScaleEntity);
+            return false;
         }
-        if (m_fogMode == FogMode::DistanceLinked)
-            m_fogStart = m_originalFogStart;
-    }
-
-    void capture_original_fog_end(const float value)
-    {
-        if (value < 0.0f || value > 100000.0f)
-            return;
-
-        m_originalFogEnd = clamp_float(value, 1.0f, kMaxFogDistance);
-        m_originalFogEndCaptured = true;
-        if (m_gameFogSampling && m_fogMode == FogMode::Game)
-        {
-            m_fogEnd = clamp_float(m_originalFogEnd, m_fogStart + 1.0f, kMaxFogDistance);
-            m_gameFogSawEnd = true;
-            return;
-        }
-        if (m_fogMode == FogMode::DistanceLinked)
-            m_fogEnd = clamp_float(m_originalFogEnd, m_fogStart + 1.0f, kMaxFogDistance);
-    }
-
-    void sync_default_fog_range()
-    {
-        if (m_originalFogStartCaptured)
-            m_fogStart = m_originalFogStart;
-        if (m_originalFogEndCaptured)
-            m_fogEnd = clamp_float(m_originalFogEnd, m_fogStart + 1.0f, kMaxFogDistance);
-    }
-
-    void restore_fog_state()
-    {
-        if (m_device == nullptr)
-            return;
-
-        m_applyingForcedFogState = true;
-        m_fogDeviceState.restore(m_device);
-        m_applyingForcedFogState = false;
-    }
-
-    void reset_game_fog_sample(const bool syncFromOriginal)
-    {
-        m_gameFogSampling = false;
-        m_gameFogSawStart = false;
-        m_gameFogSawEnd = false;
-        if (syncFromOriginal)
-            sync_default_fog_range();
-    }
-
-    void begin_game_fog_sample(const bool isRenderingBackBuffer)
-    {
-        if (!isRenderingBackBuffer || m_fogMode != FogMode::Game || m_gameFogSampling)
-            return;
-
-        if (!capture_original_draw_distances())
-            return;
-        if (!restore_draw_distances())
-            return;
-
-        m_gameFogSampling = true;
-        m_gameFogSawStart = false;
-        m_gameFogSawEnd = false;
-    }
-
-    void finish_game_fog_sample()
-    {
-        if (!m_gameFogSampling)
-            return;
-
-        m_gameFogSampling = false;
-        apply_draw_distances();
-    }
-
-    void finish_game_fog_sample_if_ready()
-    {
-        if (m_gameFogSampling && m_gameFogSawStart && m_gameFogSawEnd)
-            finish_game_fog_sample();
-    }
-
-    void apply_fog_state_before_draw(unsigned primitives)
-    {
-        finish_game_fog_sample();
-        const auto writes = apply_forced_fog_state();
-        m_fogComparison.draw(primitives, writes);
-    }
-
-    FogDeviceState::Writes apply_forced_fog_state()
-    {
-        if (m_device == nullptr || !should_force_fog_state() || m_applyingForcedFogState)
-            return {};
-
-        const float range = std::max(m_fogEnd - m_fogStart, 1.0f);
-        const FogDeviceState::Constant shaderFog{ 1.0f / range, 0.0f, m_fogEnd, 0.0f };
-
-        m_applyingForcedFogState = true;
-        const auto writes = m_fogDeviceState.apply(m_device, float_to_dword(m_fogStart),
-            float_to_dword(m_fogEnd), shaderFog, m_fogComparison.optimized());
-        m_applyingForcedFogState = false;
-        return writes;
+        return true;
     }
 
     void restore_default_runtime()
     {
-        finish_game_fog_sample();
         reset_config_to_defaults();
         apply_draw_distances();
         apply_lod_mode();
         apply_active_fog_mode();
+        m_mipCommand.store(MipCommand::On);
+        set_terrain_groups_enabled(true);
+        save_prop_range(kDefaultPropRange);
     }
 
     uint16_t get_current_zone() const
@@ -1955,12 +1342,10 @@ private:
         if (zoneId == 0 || zoneId == m_currentZoneId)
             return;
 
-        finish_fog_comparison("zone_change");
         if (m_useZoneProfiles && m_currentZoneId != 0 && m_activeZoneHasProfile)
             save_zone_profile(m_currentZoneId);
 
         m_currentZoneId = zoneId;
-        finish_mip_comparison("zone_change");
         m_mipmaps.zone_changed();
         if (m_useZoneProfiles)
         {
@@ -1995,6 +1380,144 @@ private:
         save_config(false);
     }
 
+    void print_terrain_group_help()
+    {
+        chat("/vv terraingroups on | off | status");
+        chat("/vv terraingroups zone off | default");
+    }
+
+    bool install_terrain_group_hook()
+    {
+        if (m_terrainGroupPatch.patched)
+            return true;
+        if (!m_ffxiMainBase || !m_ffxiMainSize)
+            refresh_ffximain();
+        const uintptr_t site = m_ffxiMainBase + TerrainGroupSelectRva;
+        if (!m_ffxiMainBase || m_ffxiMainSize < TerrainGroupFallbackRva + sizeof(TerrainGroupFallback) ||
+            !bytes_match(site, TerrainGroupSelect, sizeof(TerrainGroupSelect)) ||
+            !bytes_match(m_ffxiMainBase + TerrainGroupFallbackRva, TerrainGroupFallback, sizeof(TerrainGroupFallback)))
+        {
+            chat("Terrain extension unavailable for this client.");
+            return false;
+        }
+        g_terrainGroupReturn = site + TerrainGroupHookLength;
+        if (!write_jump_patch(m_terrainGroupPatch, site, reinterpret_cast<void*>(&vanaview_terrain_group_hook),
+            TerrainGroupHookLength))
+        {
+            chat("Could not install the terrain extension.");
+            return false;
+        }
+        return true;
+    }
+
+    void publish_terrain_group_policy()
+    {
+        const bool enable = m_terrainGroupsEnabled && !m_terrainGroupZoneExcluded;
+        const LONG zone = m_terrainGroupZoneId;
+        ::InterlockedExchange(&g_terrainGroupPolicy, zone && enable ? zone | 0x10000L : zone);
+    }
+
+    void update_terrain_group_zone(uint16_t zoneId)
+    {
+        if (m_terrainGroupZoneId == zoneId)
+            return;
+        m_terrainGroupZoneId = zoneId;
+        char key[8]{};
+        std::snprintf(key, sizeof(key), "%u", static_cast<unsigned int>(zoneId));
+        m_terrainGroupZoneExcluded = zoneId &&
+            ::GetPrivateProfileIntA("terrain_groups_excluded", key, 0, m_configPath) != 0;
+        publish_terrain_group_policy();
+    }
+
+    void handle_terrain_groups(const char* mode, const char* value)
+    {
+        const uint16_t zoneId = get_current_zone();
+        update_terrain_group_zone(zoneId);
+        if (!mode || (iequals(mode, "status") && !value))
+        {
+            chat("Terrain extension %s, zone %u %s.", m_terrainGroupsEnabled ? "on" : "off",
+                unsigned(zoneId), m_terrainGroupZoneExcluded ? "excluded" : "follows global");
+            return;
+        }
+
+        if (iequals(mode, "zone") && value && (iequals(value, "off") || iequals(value, "default")))
+        {
+            if (!zoneId)
+            {
+                chat("Enter a zone before changing its terrain groups setting.");
+                return;
+            }
+            const bool exclude = iequals(value, "off");
+            char key[8]{};
+            std::snprintf(key, sizeof(key), "%u", static_cast<unsigned int>(zoneId));
+            if (!::WritePrivateProfileStringA("terrain_groups_excluded", key, exclude ? "1" : nullptr, m_configPath))
+            {
+                chat("Could not save the terrain groups zone setting.");
+                return;
+            }
+            m_terrainGroupZoneExcluded = exclude;
+            publish_terrain_group_policy();
+            chat("Terrain groups: zone %u %s.", static_cast<unsigned int>(zoneId),
+                exclude ? "excluded" : "uses global setting");
+            return;
+        }
+
+        if (!value && (iequals(mode, "on") || iequals(mode, "off")))
+        {
+            const bool enable = iequals(mode, "on");
+            if (set_terrain_groups_enabled(enable))
+                chat("Terrain groups: global %s%s.", enable ? "on" : "off",
+                    enable && m_terrainGroupZoneExcluded ? " (current zone excluded)" : "");
+            return;
+        }
+        print_terrain_group_help();
+    }
+
+    bool set_terrain_groups_enabled(bool enable)
+    {
+        if (enable && !install_terrain_group_hook())
+            return false;
+        if (!::WritePrivateProfileStringA("terrain_groups", "enabled", enable ? "1" : "0", m_configPath))
+        {
+            chat("Could not save the global terrain groups setting.");
+            return false;
+        }
+        m_terrainGroupsEnabled = enable;
+        update_terrain_group_zone(get_current_zone());
+        publish_terrain_group_policy();
+        return true;
+    }
+
+    bool set_prop_range(float range)
+    {
+        if (!(range >= 1.0f && range <= 4.0f)) range = kDefaultPropRange;
+        if (range == 1.0f) {
+            if (!restore_patch(m_terrainRangePatch)) return false;
+        } else if (!m_terrainRangePatch.patched) {
+            const auto site = m_ffxiMainBase + TerrainRangeStoreRva;
+            if (!m_ffxiMainBase || m_ffxiMainSize < 0x17BFAC + sizeof(TerrainFarProjectionCall) ||
+                !bytes_match(m_ffxiMainBase + 0x17BF75, TerrainFarArguments, sizeof(TerrainFarArguments)) ||
+                !bytes_match(m_ffxiMainBase + 0x17BFAC, TerrainFarProjectionCall, sizeof(TerrainFarProjectionCall)) ||
+                !bytes_match(m_ffxiMainBase + 0x17BF45, TerrainRangeSetup, sizeof(TerrainRangeSetup)) ||
+                !bytes_match(site, TerrainRangeStore, sizeof(TerrainRangeStore))) {
+                chat("Object range unavailable for this client.");
+                return false;
+            }
+            g_terrainRangeReturn = site + sizeof(TerrainRangeStore);
+            if (!write_jump_patch(m_terrainRangePatch, site, reinterpret_cast<void*>(&vanaview_terrain_range_hook),
+                    sizeof(TerrainRangeStore))) return false;
+        }
+        g_propRangeScaleSquared = range * range;
+        m_propRange = range;
+        return true;
+    }
+
+    void save_prop_range(float range)
+    {
+        if (set_prop_range(range))
+            write_profile_float("props", "range", m_propRange);
+    }
+
     bool apply_lod_mode()
     {
         if (!restore_lod_patches()) return false;
@@ -2004,36 +1527,6 @@ private:
         const auto shift = lod_layout_shift(m_ffxiMainBase, m_ffxiMainSize);
         if (!shift) return false;
         return m_lodMode == LodMode::High ? install_lod_high(*shift) : install_lod_range(*shift);
-    }
-
-    void save_lod_diagnostic()
-    {
-        refresh_ffximain();
-        if (!m_ffxiMainBase || !m_ffxiMainSize) {
-            chat("LoD diagnostic: FFXiMain.dll is unavailable.");
-            return;
-        }
-        auto path = mip_log_path(m_core->GetInstallPath(), "VanaView-lod-diag");
-        path.replace_extension(".txt");
-        FILE* file = nullptr;
-        if (_wfopen_s(&file, path.c_str(), L"wbx") != 0 || !file) {
-            chat("LoD diagnostic could not open the log.");
-            return;
-        }
-        float world = 0.0f, entity = 0.0f;
-        const bool worldRead = safe_read(m_worldDistanceAddress, world);
-        const bool entityRead = safe_read(m_entityDistanceAddress, entity);
-        std::fprintf(file,
-            "image_size=%08X zone=%u lod=%d distance_requested=%.6f world=%.6f world_valid=%d entity=%.6f entity_valid=%d\n",
-            m_ffxiMainSize, static_cast<unsigned>(m_currentZoneId), static_cast<int>(m_lodMode),
-            m_drawDistance, world, worldRead, entity, entityRead);
-        std::fputs("legacy_sites\n", file);
-        for (const uint32_t site : {0x0017B63AU, 0x0017CAAFU})
-            write_lod_window(file, m_ffxiMainBase, m_ffxiMainSize, site);
-        std::fputs("comparison_candidates\n", file);
-        write_lod_candidates(file, m_ffxiMainBase, m_ffxiMainSize);
-        if (std::fclose(file) == 0) chat("LoD diagnostic saved: %s", path.filename().string().c_str());
-        else chat("LoD diagnostic could not finish the log.");
     }
 
     bool install_lod_high(uint32_t shift)
@@ -2086,18 +1579,11 @@ private:
         return a && b && range;
     }
 
-    MipmapExperiment m_mipmaps;
-    MipmapProfile m_mipProfile;
-    MipmapComparison m_mipComparison;
-    FogComparison m_fogComparison;
-    FogDeviceState m_fogDeviceState;
-    std::atomic<bool> m_fogCompareRequested{false};
-    bool m_fogComparePausedMips = false;
+    TerrainMipmaps m_mipmaps;
+    BytesPatchSite m_fogScaleWorld{}, m_fogScaleEntity{};
     std::atomic<MipCommand> m_mipCommand{MipCommand::None};
     bool m_mipEnabled = true;
     bool m_mipStartupPending = false;
-    RenderDiagnostics m_diagnostics;
-    bool m_diagBackBuffer = false;
     IAshitaCore* m_core = nullptr;
     IDirect3DDevice8* m_device = nullptr;
     uintptr_t m_ffxiMainBase = 0;
@@ -2109,6 +1595,12 @@ private:
     float m_originalEntityDistance = 0.0f;
     BytesPatchSite m_lodPatchSites[2]{};
     BytesPatchSite m_lodRangePatchSites[4]{};
+    BytesPatchSite m_terrainRangePatch{};
+    float m_propRange = 1.0f;
+    BytesPatchSite m_terrainGroupPatch{};
+    bool m_terrainGroupsEnabled = false;
+    uint16_t m_terrainGroupZoneId = 0;
+    bool m_terrainGroupZoneExcluded = false;
     float m_drawDistance = default_draw_distance();
     enum class LodMode : int
     {
@@ -2119,16 +1611,6 @@ private:
     LodMode m_lodMode = LodMode::High;
     float m_lodRangeScale = 1.0f;
     FogMode m_fogMode = FogMode::Game;
-    float m_fogStart = kDefaultFogStart;
-    float m_fogEnd = kDefaultFogEnd;
-    bool m_originalFogStartCaptured = false;
-    bool m_originalFogEndCaptured = false;
-    float m_originalFogStart = kDefaultFogStart;
-    float m_originalFogEnd = kDefaultFogEnd;
-    bool m_applyingForcedFogState = false;
-    bool m_gameFogSampling = false;
-    bool m_gameFogSawStart = false;
-    bool m_gameFogSawEnd = false;
     bool m_activeZoneHasProfile = false;
     bool m_useZoneProfiles = false;
     uint16_t m_currentZoneId = 0;

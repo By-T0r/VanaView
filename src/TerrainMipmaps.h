@@ -14,7 +14,7 @@
 #include <vector>
 
 // Scoped draw substitution for precomputed DXT3 pairs or automatic color mips.
-class MipmapExperiment
+class TerrainMipmaps
 {
     template<class T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
@@ -210,7 +210,6 @@ public:
                                             selected.originalDetail, selected.detail);
             if (selected.firstUse) m_auto.finish_first_use(color.Get(), start, drawn, selected.detail != nullptr);
             if (drawn) {
-                m_auto.drawn();
                 if (selected.blended) {
                     ++m_stats.blend;
                     if (selected.detail) ++m_stats.blendDetail;
