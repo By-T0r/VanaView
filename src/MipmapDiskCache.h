@@ -14,7 +14,7 @@ class MipmapDiskCache
 {
 public:
     static constexpr size_t Budget = 64 * 1024 * 1024;
-    static constexpr size_t MaxPayload = 384 * 1024;
+    static constexpr size_t MaxPayload = 768 * 1024;
 
     static uint64_t key(const Dxt3::Layout& layout, const uint8_t* top)
     {
@@ -106,7 +106,7 @@ private:
     using FileTime = std::filesystem::file_time_type;
     static constexpr unsigned Buckets = 80, Ways = 4;
     // Reserve space for metadata and one staged payload during replacement.
-    static constexpr uintmax_t PayloadBudget = Budget - 512 * 1024;
+    static constexpr uintmax_t PayloadBudget = Budget - 1024 * 1024;
     static constexpr uint32_t Signature = 0x314D5656; // VVM1
     static constexpr uint32_t Algorithm = 1;
     static constexpr uint32_t UseSignature = 0x31555656; // VVU1
