@@ -458,7 +458,25 @@ struct TerrainRoutingTest {
             color.Attach(original_from_chain(device,dds));
             CHECK(SUCCEEDED(device->SetTexture(0,color.Get())));
             CHECK(!plugin->Direct3DDrawPrimitive(D3DPT_TRIANGLESTRIP,0,1));
-            CHECK(terrain.automatic().pending());
+            const auto& pipeline = terrain.automatic();
+            CHECK(pipeline.pending());
+            // Start the regular worker, then check the extra slot with fixed frame times.
+            for (unsigned frame=0; frame<500 && !pipeline.m_candidate; ++frame)
+                terrain.present(device);
+            CHECK(pipeline.m_candidate);
+            for (unsigned wait=0; wait<3000 && !pipeline.m_buildDone.load(std::memory_order_acquire); ++wait)
+                Sleep(1);
+            CHECK(pipeline.m_buildDone.load(std::memory_order_acquire));
+            using namespace std::chrono_literals;
+            CHECK(pipeline.can_advance_cached_color(33ms, 0us) == (visit == 1));
+            CHECK(!pipeline.can_advance_cached_color(41ms, 0us));
+            CHECK(!pipeline.can_advance_cached_color(33ms, 250us));
+            terrain.present(device);
+            // The hit must survive the handoff from the worker to the active upload.
+            for (unsigned frame=0; frame<5 && !pipeline.m_upload; ++frame)
+                terrain.present(device);
+            CHECK(pipeline.m_upload);
+            CHECK(pipeline.can_advance_cached_color(33ms, 0us) == (visit == 1));
             for (unsigned frame=0; frame<500 && terrain.automatic().pending(); ++frame) {
                 Sleep(1);
                 terrain.present(device);

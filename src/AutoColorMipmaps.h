@@ -13,6 +13,7 @@
 // a copied BC2 payload and the buffers for its lower levels.
 class AutoColorMipmaps
 {
+    friend struct TerrainRoutingTest;
     using Source = Microsoft::WRL::ComPtr<IDirect3DBaseTexture8>;
     static constexpr size_t MaxBytes = 16 * 1024 * 1024;
     static constexpr size_t MaxDetailBytes = 4 * 1024 * 1024;
@@ -65,6 +66,7 @@ class AutoColorMipmaps
         size_t offset = 0;
         UINT level = 0;
         UINT row = 0;
+        bool diskHit = false;
     };
 
 public:
@@ -222,7 +224,8 @@ public:
     void present(IDirect3DDevice8* device)
     {
         const auto start = Clock::now();
-        const bool slowFrame = m_lastPresent != Clock::time_point{} && start - m_lastPresent > std::chrono::milliseconds(22);
+        const auto interval = start - m_lastPresent;
+        const bool slowFrame = m_lastPresent != Clock::time_point{} && interval > std::chrono::milliseconds(22);
         m_lastPresent = start;
         ++m_frame;
         m_attempts = 0;
@@ -235,6 +238,10 @@ public:
                 if (!m_candidate && !m_waiting.empty() && Clock::now() - start < PipelineBudget)
                     prepare_next();
                 m_nextWorkFrame = m_frame + 3;
+            } else if (can_advance_cached_color(interval, Clock::now() - start)) {
+                // Use an intervening frame for one upload step on a ready disk hit.
+                collect_prepared();
+                if (m_upload) advance_upload(device);
             } else {
                 ++m_stats.paced;
             }
@@ -640,6 +647,15 @@ private:
         return true;
     }
 
+    bool can_advance_cached_color(Clock::duration interval, Clock::duration elapsed) const
+    {
+        if (m_firstUseThisFrame || interval > std::chrono::milliseconds(40) || elapsed >= PipelineBudget)
+            return false;
+        if (m_upload) return !m_upload->request.detail && m_upload->diskHit;
+        return m_candidate && !m_candidate->detail && m_buildDone.load(std::memory_order_acquire) &&
+            !m_buildFailed && m_diskWork.hit;
+    }
+
     void collect_prepared()
     {
         if (m_upload || !m_candidate || !m_buildDone.load(std::memory_order_acquire)) return;
@@ -656,6 +672,7 @@ private:
             return;
         }
         m_upload.emplace(Upload{std::move(*m_candidate), std::move(m_build->data), {}});
+        m_upload->diskHit = m_diskWork.hit;
         clear_builder();
     }
 
