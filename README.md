@@ -43,8 +43,6 @@ The default profile is global. Expand **Zone settings** to enable per-zone profi
 
 With dgVoodoo, set **DirectX → Mipmapping** to **App driven**. Trilinear and anisotropic 8× filtering have been tested.
 
-The legacy commands `/vv grass`, `/vv flowers`, `/vv fan`, and `/vv palm` with `on` or `off` all change the shared foliage setting. Use `/vv mip status` to see both settings.
-
 Use `/vv coverage` to toggle green highlighting on scenery draws using VanaView mipmaps. Original draws retain their scene colours. Use `/vv coverage off` to end the overlay.
 
 Use `/vv help` for chat commands. For example, `/vv proprange 1.5` sets global object range and `/vv terraingroups zone off` excludes the current zone. Use `/vv terraingroups zone default` to follow the global setting again.
