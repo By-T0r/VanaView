@@ -5,6 +5,30 @@
 struct MipCommandTest {
     static void run(const char* path) {
         auto plugin=std::make_unique<VanaView>();
+        // Exercise the same writer as the menu, including before the second Present.
+        const std::filesystem::path folder = std::string(path) + "-reports";
+        const auto empty = plugin->save_diagnostic_report(folder);
+        CHECK(std::filesystem::file_size(empty) > 0);
+        auto now = VanaView::FrameClock::time_point{} + std::chrono::seconds(1);
+        plugin->remember_frame(now, 1);
+        for (int i = 0; i < 901; ++i) {
+            now += std::chrono::milliseconds(i == 900 ? 90 : 30);
+            plugin->remember_frame(now, i ? 2 : 1);
+        }
+        const auto report = plugin->save_diagnostic_report(folder);
+        CHECK(report != empty);
+        std::ifstream in(report);
+        const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+        CHECK(text.find("VanaView 2.00 diagnostic report") != std::string::npos);
+        CHECK(text.find("pauses): 900") != std::string::npos);
+        CHECK(text.find("30.00 / 30.00 / 90.00") != std::string::npos);
+        CHECK(text.find("\n1,30.00") == std::string::npos && text.ends_with("2,90.00\n"));
+        in.close();
+        bool failed = false;
+        try { plugin->save_diagnostic_report(report); }
+        catch (const std::filesystem::filesystem_error&) { failed = true; }
+        CHECK(failed && std::filesystem::remove(report) && std::filesystem::remove(empty));
+        CHECK(std::filesystem::remove(folder));
         strcpy_s(plugin->m_configPath,path);
         auto verify=[&](bool ground, bool foliage) {
             CHECK(plugin->m_scenery.groundEnabled==ground);

@@ -37,11 +37,15 @@ Open `/vv` to adjust these settings while looking at the scene. The window scale
 
 The default profile is global. Expand **Zone settings** to enable per-zone profiles or exclude the current zone from the terrain extension. Object range, scenery mipmaps and shadow settings apply across zones. Shadow preferences are saved when changed. Settings are stored in `config/plugins/VanaView.ini`.
 
+VanaView 2.0 reuses your existing ground mipmap cache. Each cache group can now keep a fifth texture, reducing the need to rebuild mipmaps when you revisit a zone. The disk limit remains 64 MiB.
+
 With dgVoodoo, set **DirectX → Mipmapping** to **App driven**. Trilinear and anisotropic 8× filtering have been tested.
 
 The legacy commands `/vv grass`, `/vv flowers`, `/vv fan`, and `/vv palm` with `on` or `off` all change the shared foliage setting. Use `/vv mip status` to see both settings.
 
 Use `/vv coverage` to toggle green highlighting on scenery draws using VanaView mipmaps. Original draws retain their scene colours. Use `/vv coverage off` to end the overlay.
+
+If the game stutters, open `/vv` and click **Save diagnostic report** soon after it happens. Chat shows the filename under `logs/VanaView` in your Ashita folder. The text file includes up to the last 900 frame intervals (about 30 seconds at 30 FPS), zone IDs, graphics settings and mipmap cache counters. You can review it and attach it to your issue with a short description of what you saw. Sharing is manual.
 
 Use `/vv help` for chat commands. For example, `/vv proprange 1.5` sets global object range and `/vv terraingroups zone off` excludes the current zone. Use `/vv terraingroups zone default` to follow the global setting again.
 
