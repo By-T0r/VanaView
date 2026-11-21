@@ -153,6 +153,17 @@ public:
         return describe_pass(device, D3DPT_TRIANGLELIST, false).shader;
     }
 
+    // Keep compatible fixed-function ground on its persistent cache while it warms.
+    static bool uses_fixed_ground_cache(IDirect3DDevice8* device, D3DPRIMITIVETYPE type)
+    {
+        if (type != D3DPT_TRIANGLESTRIP || !describe_pass(device, type, true).valid || !uses_mips(device))
+            return false;
+        Source color, detail;
+        D3DSURFACE_DESC desc{};
+        return SUCCEEDED(device->GetTexture(0, color.GetAddressOf())) && eligible_color(color.Get(), desc) &&
+            SUCCEEDED(device->GetTexture(1, detail.GetAddressOf())) && !detail;
+    }
+
     Selection select(IDirect3DDevice8* device, D3DPRIMITIVETYPE type, IDirect3DBaseTexture8* color, bool cacheOnly,
                      bool useDetail, bool useBlend)
     {
@@ -352,13 +363,18 @@ private:
         m_waiting.push_back(std::move(item));
     }
 
+    static bool eligible_color(IDirect3DBaseTexture8* color, D3DSURFACE_DESC& desc)
+    {
+        return Dxt3::describe(color, desc) && eligible_dimension(desc.Width) &&
+            eligible_dimension(desc.Height) && size_t(desc.Width) * desc.Height <= MaxPixels;
+    }
+
     void consider(IDirect3DDevice8* device, D3DPRIMITIVETYPE type, IDirect3DBaseTexture8* color)
     {
         const auto& skip = skip_slot(color);
         if ((skip.color == color && skip.until > m_frame) || m_attempts >= 4) return;
         D3DSURFACE_DESC colorDesc{}, detailDesc{};
-        if (!Dxt3::describe(color, colorDesc) || !eligible_dimension(colorDesc.Width) ||
-            !eligible_dimension(colorDesc.Height) || size_t(colorDesc.Width) * colorDesc.Height > MaxPixels) {
+        if (!eligible_color(color, colorDesc)) {
             skip_slot(color) = {color, m_frame + 120};
             return;
         }

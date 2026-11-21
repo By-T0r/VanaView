@@ -1,11 +1,5 @@
 // Standalone x86 D3D8 smoke test; no FFXI process or game files are accessed.
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-#include <cstdint>
-#include <d3d8/includes/d3d8.h>
-#include "../src/TerrainMipmaps.h"
-#include "../src/SceneryMipmaps.h"
+#include "../src/VanaView.cpp"
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); std::exit(1); } } while (0)
 
@@ -447,7 +441,57 @@ static void test_camera_rotation_cache(IDirect3DDevice8* device)
     std::puts("PASS: 40 terrain textures remain ready while alternating camera views.");
 }
 
-static void test_fixed_function_terrain(IDirect3DDevice8* device, IDirect3DTexture8* color)
+struct TerrainRoutingTest {
+    static void run(IDirect3DDevice8* device, const std::filesystem::path& dds,
+                    const std::filesystem::path& cache)
+    {
+        auto plugin=std::make_unique<VanaView>();
+        plugin->m_device=device;
+        plugin->m_useZoneProfiles=false;
+        auto& terrain=plugin->m_mipmaps;
+        terrain.set_disk_directory(cache);
+        std::string message;
+        CHECK(terrain.start_ground_mipmaps(device,message));
+        plugin->update_zone_profile(1);
+        for (unsigned visit=0; visit<2; ++visit) {
+            Dxt3::Texture color;
+            color.Attach(original_from_chain(device,dds));
+            CHECK(SUCCEEDED(device->SetTexture(0,color.Get())));
+            CHECK(!plugin->Direct3DDrawPrimitive(D3DPT_TRIANGLESTRIP,0,1));
+            CHECK(terrain.automatic().pending());
+            for (unsigned frame=0; frame<500 && terrain.automatic().pending(); ++frame) {
+                Sleep(1);
+                terrain.present(device);
+                plugin->m_scenery.present(device);
+                if (terrain.automatic().pending())
+                    CHECK(!plugin->Direct3DDrawPrimitive(D3DPT_TRIANGLESTRIP,0,1));
+            }
+            CHECK(plugin->Direct3DDrawPrimitive(D3DPT_TRIANGLESTRIP,0,1));
+            const auto& stats=terrain.automatic().stats();
+            CHECK(stats.diskWrites==1 && stats.diskMisses==1 && stats.diskHits==visit);
+            CHECK(plugin->m_scenery.generated==0);
+            CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHATESTENABLE,TRUE)));
+            CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHAFUNC,D3DCMP_NOTEQUAL)));
+            for (bool ground : {true,false}) for (bool foliage : {true,false}) {
+                plugin->m_scenery.groundEnabled=ground;
+                plugin->m_scenery.foliageEnabled=foliage;
+                CHECK(!plugin->Direct3DDrawPrimitive(D3DPT_TRIANGLESTRIP,0,1));
+                Microsoft::WRL::ComPtr<IDirect3DBaseTexture8> bound;
+                CHECK(SUCCEEDED(device->GetTexture(0,bound.GetAddressOf())) && bound.Get()==color.Get());
+            }
+            plugin->m_scenery.groundEnabled=plugin->m_scenery.foliageEnabled=true;
+            CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHATESTENABLE,FALSE)));
+            CHECK(SUCCEEDED(device->SetTexture(0,nullptr)));
+            plugin->update_zone_profile(2);
+            CHECK(terrain.automatic().count()==0);
+            plugin->update_zone_profile(1);
+        }
+        std::puts("PASS: plugin ground draw reloads from disk on zone return and leaves unknown cutouts original.");
+    }
+};
+
+static void test_fixed_function_terrain(IDirect3DDevice8* device, IDirect3DTexture8* color,
+                                        const std::filesystem::path& dds, const std::filesystem::path& install)
 {
     TerrainMipmaps experiment;
     std::string message;
@@ -503,6 +547,10 @@ static void test_fixed_function_terrain(IDirect3DDevice8* device, IDirect3DTextu
     CHECK(SUCCEEDED(device->GetTexture(0, current.GetAddressOf())) && current.Get() == color);
     experiment.stop();
     std::puts("PASS: fixed-function terrain color mipmaps, blend, sampler restoration, and exclusion of other passes.");
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ZWRITEENABLE,TRUE)));
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE)));
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHATESTENABLE,FALSE)));
+    TerrainRoutingTest::run(device,dds,install / ("zone-cache-"+std::to_string(GetTickCount64())));
     test_camera_rotation_cache(device);
     test_large_rectangles(device);
 }
@@ -561,7 +609,7 @@ static void test_mipmaps(IDirect3DDevice8* device, const std::filesystem::path& 
     experiment.stop();
     CHECK(!experiment.draw(device, D3DPT_TRIANGLELIST, 0, 1));
     test_automatic_mips(device, experiment, folder, color, detail, install);
-    test_fixed_function_terrain(device, color);
+    test_fixed_function_terrain(device, color, folder / "pavement-a-color.dds", install);
 
     CHECK(SUCCEEDED(device->EndScene()));
     CHECK(SUCCEEDED(device->SetTexture(0, nullptr)));
@@ -614,6 +662,17 @@ static void test_scenery_switches(IDirect3DDevice8* device)
         scene.present(device);
     }
     CHECK(draw(false) && draw(true));
+    // Both replacement chains are warm: unsupported comparisons must use neither.
+    for (auto func : {D3DCMP_NOTEQUAL,D3DCMP_EQUAL,D3DCMP_LESS,D3DCMP_LESSEQUAL,
+                      D3DCMP_NEVER,D3DCMP_ALWAYS}) {
+        CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHAFUNC,func)));
+        for (bool ground : {false,true}) for (bool foliage : {false,true}) {
+            scene.groundEnabled=ground;
+            scene.foliageEnabled=foliage;
+            CHECK(!draw(true));
+        }
+    }
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHAFUNC,D3DCMP_GREATER)));
     scene.foliageEnabled=false;
     CHECK(draw(false) && !draw(true));
     scene.groundEnabled=false;

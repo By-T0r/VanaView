@@ -2,6 +2,7 @@
 #include "Dxt3Mipmaps.h"
 #include <d3d8/includes/d3dx8.h>
 #include <map>
+#include <optional>
 #include <tuple>
 #include <filesystem>
 #include <fstream>
@@ -51,13 +52,15 @@ class SceneryMipmaps {
         std::array<DWORD,7> decl{};DWORD n=sizeof decl;
         return (vs&1) && SUCCEEDED(d->GetVertexShaderDeclaration(vs,decl.data(),&n)) && n==sizeof decl && decl==mmb;
     }
-    static unsigned alpha_cutoff(IDirect3DDevice8* d) {
+    static std::optional<unsigned> alpha_cutoff(IDirect3DDevice8* d) {
         DWORD test=0,func=0,ref=0;
-        if(FAILED(d->GetRenderState(D3DRS_ALPHATESTENABLE,&test)) || !test ||
-           FAILED(d->GetRenderState(D3DRS_ALPHAFUNC,&func)) ||
-           FAILED(d->GetRenderState(D3DRS_ALPHAREF,&ref))) return 0;
+        if (FAILED(d->GetRenderState(D3DRS_ALPHATESTENABLE,&test))) return std::nullopt;
+        if (!test) return 0;
+        if (FAILED(d->GetRenderState(D3DRS_ALPHAFUNC,&func)) ||
+           FAILED(d->GetRenderState(D3DRS_ALPHAREF,&ref))) return std::nullopt;
         if(func==D3DCMP_GREATER && ref<255) return ref+1;
-        return func==D3DCMP_GREATEREQUAL?ref:0;
+        if(func==D3DCMP_GREATEREQUAL && ref<=255) return ref;
+        return std::nullopt;
     }
     // Downsample in premultiplied colour. For a cutout, rescale alpha toward
     // the fraction of top-level texels that pass the draw's threshold.
@@ -235,7 +238,10 @@ public:
         if(busy || restoreFailed || !d || (type!=D3DPT_TRIANGLELIST && type!=D3DPT_TRIANGLESTRIP && type!=D3DPT_TRIANGLEFAN) || !world(d,ps)) return false;
         struct Binding {Base original; Dxt3::Texture replacement; DWORD stage,filter;bool filterChanged=false;};
         std::array<Binding,8> saved{};
-        unsigned used=0; const unsigned cutoff=alpha_cutoff(d);
+        const auto threshold=alpha_cutoff(d);
+        if (!threshold) return false;
+        const unsigned cutoff=*threshold;
+        unsigned used=0;
         if (!(cutoff ? foliageEnabled : groundEnabled)) return false;
         for(DWORD stage=0;stage<saved.size();++stage) {
             DWORD op=0,filter=0;

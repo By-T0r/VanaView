@@ -765,7 +765,7 @@ public:
         UNREFERENCED_PARAMETER(hDestWindowOverride);
         UNREFERENCED_PARAMETER(pDirtyRegion);
 
-        update_zone_profile();
+        update_zone_profile(get_current_zone());
         if (m_zoneDistancePending) {
             const auto now=GetTickCount64();
             if (now>=m_zoneDistanceNextCheck)
@@ -799,12 +799,15 @@ public:
 
     bool Direct3DDrawPrimitive(D3DPRIMITIVETYPE primitiveType, UINT startVertex, UINT primitiveCount) override
     {
-        unsigned levels=0; DWORD ps=0;
-        // Keep the verified shader terrain path, including its paired detail map.
-        bool shaderTerrain=m_device && SUCCEEDED(m_device->GetPixelShader(&ps)) && ps!=0;
-        bool drawn=shaderTerrain && m_scenery.groundEnabled && m_mipmaps.draw(m_device,primitiveType,startVertex,primitiveCount,&levels);
-        if(!drawn) return draw_scenery(primitiveType,[&]{return m_device->DrawPrimitive(primitiveType,startVertex,primitiveCount);});
-        return drawn;
+        DWORD shader=0;
+        if (m_device && m_scenery.groundEnabled && m_mipmaps.mode()==TerrainMipmaps::Mode::Auto &&
+            SUCCEEDED(m_device->GetPixelShader(&shader))) {
+            if (!shader && AutoColorMipmaps::uses_fixed_ground_cache(m_device,primitiveType))
+                return m_mipmaps.draw(m_device,primitiveType,startVertex,primitiveCount);
+            if (shader && m_mipmaps.draw(m_device,primitiveType,startVertex,primitiveCount))
+                return true;
+        }
+        return draw_scenery(primitiveType,[&]{return m_device->DrawPrimitive(primitiveType,startVertex,primitiveCount);});
     }
 
     bool Direct3DDrawIndexedPrimitive(D3DPRIMITIVETYPE type, UINT minIndex, UINT vertices, UINT start, UINT count) override
@@ -847,6 +850,7 @@ private:
     }
 
     friend struct MipCommandTest;
+    friend struct TerrainRoutingTest;
     struct MipRequest {
         std::optional<bool> ground, foliage;
         bool report=false;
@@ -1534,9 +1538,8 @@ private:
         }
     }
 
-    void update_zone_profile()
+    void update_zone_profile(uint16_t zoneId)
     {
-        const uint16_t zoneId = get_current_zone();
         if (zoneId == 0) {
             if (!m_zoneDistancePending) schedule_zone_distance();
             return;
