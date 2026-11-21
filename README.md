@@ -18,8 +18,10 @@ Open `/vv` to adjust these settings while looking at the scene. The window scale
 ## Install
 
 1. Download **VanaView.dll** from the [latest release](https://github.com/By-T0r/VanaView/releases/latest).
-2. Copy the DLL into the Ashita `plugins` directory. If updating a running client, unload VanaView first.
+2. Copy the DLL into the Ashita `plugins` directory. If the plugin is already loaded, run `/unload vanaview` before replacing the DLL.
 3. Run `/load vanaview`, then `/vv`.
+
+VanaView 2.0 reuses your existing ground mipmap cache. Each cache group can now keep a fifth texture, reducing the need to rebuild mipmaps when you revisit a zone. The disk limit remains 64 MiB.
 
 ## Configuration
 
@@ -37,13 +39,17 @@ Open `/vv` to adjust these settings while looking at the scene. The window scale
 
 The default profile is global. Expand **Zone settings** to enable per-zone profiles or exclude the current zone from the terrain extension. Object range, scenery mipmaps and shadow settings apply across zones. Shadow preferences are saved when changed. Settings are stored in `config/plugins/VanaView.ini`.
 
-With dgVoodoo, set **DirectX → Mipmapping** to **App driven**. Trilinear and anisotropic 8× filtering have been tested.
+**Restore defaults** asks for confirmation before resetting visibility, terrain, mipmaps and shadows and turning off zone profiles. Press **Esc** or choose **Cancel** to keep your settings. The chat command `/vv reset` applies the defaults immediately.
 
-The legacy commands `/vv grass`, `/vv flowers`, `/vv fan`, and `/vv palm` with `on` or `off` all change the shared foliage setting. Use `/vv mip status` to see both settings.
+With dgVoodoo, set **DirectX → Mipmapping** to **App driven**. Trilinear and anisotropic 8× filtering have been tested.
 
 Use `/vv coverage` to toggle green highlighting on scenery draws using VanaView mipmaps. Original draws retain their scene colours. Use `/vv coverage off` to end the overlay.
 
 Use `/vv help` for chat commands. For example, `/vv proprange 1.5` sets global object range and `/vv terraingroups zone off` excludes the current zone. Use `/vv terraingroups zone default` to follow the global setting again.
+
+## Reporting a stutter
+
+If the game stutters, open `/vv` and click **Save diagnostic report** soon after it happens. After a successful save, the button shows **Report saved** and stays disabled for two seconds. Chat shows the filename under `logs/VanaView` in your Ashita folder. The text file includes up to the last 900 frame intervals (about 30 seconds at 30 FPS), zone IDs, graphics settings and mipmap cache counters. You can review it and attach it to your issue with a short description of what you were doing, such as entering a zone or fighting in a party. Sharing is manual.
 
 ## Scope for server administrators
 
@@ -65,7 +71,7 @@ Run `./build.ps1 -Test` for the command, configuration and Direct3D regressions.
 
 Run `./tools/Verify-Release.ps1 -Destination ../vanaview-release-check` to rebuild and test a committed candidate in a fresh checkout. Supply the optional fixture arguments above for the extended suite. The script checks that the rebuilt DLL matches the committed DLL and prints its SHA-256.
 
-Smoke-test the verified DLL in the client. With simple actor shadows enabled, cycle Normal → High → Off → Normal. Compare Native and Full terrain shadow range on a slope in Normal mode. When publishing, tag the verified commit and attach its `dist/VanaView.dll`.
+Smoke-test the verified DLL in the client. With simple actor shadows enabled, cycle Normal → High → Off → Normal. Compare Native and Full terrain shadow range on a slope in Normal mode. Make a zone round trip with ground mipmaps enabled, save a diagnostic report and open the file named in chat. Open **Restore defaults**, press **Esc** and check that your settings are intact. When publishing, tag the verified commit and attach its `dist/VanaView.dll`.
 
 ## Credits
 

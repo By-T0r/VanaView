@@ -5,6 +5,44 @@
 struct MipCommandTest {
     static void run(const char* path) {
         auto plugin=std::make_unique<VanaView>();
+        // Exercise the same writer as the menu, including before the second Present.
+        const std::filesystem::path folder = std::string(path) + "-reports";
+        using namespace std::chrono_literals;
+        const auto firstClick = VanaView::FrameClock::now();
+        const auto empty = plugin->save_diagnostic_report(folder, firstClick);
+        CHECK(std::filesystem::file_size(empty) > 0);
+        const auto nextClick = plugin->m_nextReportTime;
+        CHECK(nextClick >= firstClick + 2s && nextClick <= VanaView::FrameClock::now() + 2s);
+        CHECK(plugin->save_diagnostic_report(folder, firstClick).empty());
+        CHECK(plugin->save_diagnostic_report(folder, nextClick - 1ms).empty());
+        CHECK(plugin->m_nextReportTime == nextClick && plugin->m_reportNumber == 1);
+        auto now = VanaView::FrameClock::time_point{} + std::chrono::seconds(1);
+        plugin->remember_frame(now, 1);
+        plugin->m_drawDistance = 4.60f; // Between slider steps 19 and 20, closer to 20.
+        // After wraparound: 450 samples at 20 ms, 449 at 40 ms and one at 90 ms.
+        for (int i = 0; i < 901; ++i) {
+            int interval = i <= 450 ? 20 : 40;
+            if (i == 900) interval = 90;
+            now += std::chrono::milliseconds(interval);
+            plugin->remember_frame(now, i ? 2 : 1);
+        }
+        // A write failure at expiry must allow an immediate retry.
+        bool failed = false;
+        try { plugin->save_diagnostic_report(empty, nextClick); }
+        catch (const std::filesystem::filesystem_error&) { failed = true; }
+        CHECK(failed && plugin->m_nextReportTime == nextClick);
+        const auto report = plugin->save_diagnostic_report(folder, nextClick);
+        CHECK(report != empty);
+        std::ifstream in(report);
+        const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+        CHECK(text.find("VanaView 2.00 diagnostic report") != std::string::npos);
+        CHECK(text.find("pauses): 900") != std::string::npos);
+        CHECK(text.find("\nDraw distance: 20  Object range: ") != std::string::npos);
+        CHECK(text.find("Median/p99/max (ms): 30.00 / 40.00 / 90.00") != std::string::npos);
+        CHECK(text.find("\n1,20.00") == std::string::npos && text.ends_with("2,90.00\n"));
+        in.close();
+        CHECK(std::filesystem::remove(report) && std::filesystem::remove(empty));
+        CHECK(std::filesystem::remove(folder));
         strcpy_s(plugin->m_configPath,path);
         auto verify=[&](bool ground, bool foliage) {
             CHECK(plugin->m_scenery.groundEnabled==ground);
