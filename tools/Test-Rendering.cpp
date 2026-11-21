@@ -1,10 +1,5 @@
 // Standalone x86 D3D8 smoke test; no FFXI process or game files are accessed.
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-#include <cstdint>
-#include <d3d8/includes/d3d8.h>
-#include "../src/TerrainMipmaps.h"
+#include "../src/VanaView.cpp"
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); std::exit(1); } } while (0)
 
@@ -446,7 +441,75 @@ static void test_camera_rotation_cache(IDirect3DDevice8* device)
     std::puts("PASS: 40 terrain textures remain ready while alternating camera views.");
 }
 
-static void test_fixed_function_terrain(IDirect3DDevice8* device, IDirect3DTexture8* color)
+struct TerrainRoutingTest {
+    static void run(IDirect3DDevice8* device, const std::filesystem::path& dds,
+                    const std::filesystem::path& cache)
+    {
+        auto plugin=std::make_unique<VanaView>();
+        plugin->m_device=device;
+        plugin->m_useZoneProfiles=false;
+        auto& terrain=plugin->m_mipmaps;
+        terrain.set_disk_directory(cache);
+        std::string message;
+        CHECK(terrain.start_ground_mipmaps(device,message));
+        plugin->update_zone_profile(1);
+        for (unsigned visit=0; visit<2; ++visit) {
+            Dxt3::Texture color;
+            color.Attach(original_from_chain(device,dds));
+            CHECK(SUCCEEDED(device->SetTexture(0,color.Get())));
+            CHECK(!plugin->Direct3DDrawPrimitive(D3DPT_TRIANGLESTRIP,0,1));
+            const auto& pipeline = terrain.automatic();
+            CHECK(pipeline.pending());
+            // Start the regular worker, then check the extra slot with fixed frame times.
+            for (unsigned frame=0; frame<500 && !pipeline.m_candidate; ++frame)
+                terrain.present(device);
+            CHECK(pipeline.m_candidate);
+            for (unsigned wait=0; wait<3000 && !pipeline.m_buildDone.load(std::memory_order_acquire); ++wait)
+                Sleep(1);
+            CHECK(pipeline.m_buildDone.load(std::memory_order_acquire));
+            using namespace std::chrono_literals;
+            CHECK(pipeline.can_advance_cached_color(33ms, 0us) == (visit == 1));
+            CHECK(!pipeline.can_advance_cached_color(41ms, 0us));
+            CHECK(!pipeline.can_advance_cached_color(33ms, 250us));
+            terrain.present(device);
+            // The hit must survive the handoff from the worker to the active upload.
+            for (unsigned frame=0; frame<5 && !pipeline.m_upload; ++frame)
+                terrain.present(device);
+            CHECK(pipeline.m_upload);
+            CHECK(pipeline.can_advance_cached_color(33ms, 0us) == (visit == 1));
+            for (unsigned frame=0; frame<500 && terrain.automatic().pending(); ++frame) {
+                Sleep(1);
+                terrain.present(device);
+                plugin->m_scenery.present(device);
+                if (terrain.automatic().pending())
+                    CHECK(!plugin->Direct3DDrawPrimitive(D3DPT_TRIANGLESTRIP,0,1));
+            }
+            CHECK(plugin->Direct3DDrawPrimitive(D3DPT_TRIANGLESTRIP,0,1));
+            const auto& stats=terrain.automatic().stats();
+            CHECK(stats.diskWrites==1 && stats.diskMisses==1 && stats.diskHits==visit);
+            CHECK(plugin->m_scenery.generated==0);
+            CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHATESTENABLE,TRUE)));
+            CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHAFUNC,D3DCMP_NOTEQUAL)));
+            for (bool ground : {true,false}) for (bool foliage : {true,false}) {
+                plugin->m_scenery.groundEnabled=ground;
+                plugin->m_scenery.foliageEnabled=foliage;
+                CHECK(!plugin->Direct3DDrawPrimitive(D3DPT_TRIANGLESTRIP,0,1));
+                Microsoft::WRL::ComPtr<IDirect3DBaseTexture8> bound;
+                CHECK(SUCCEEDED(device->GetTexture(0,bound.GetAddressOf())) && bound.Get()==color.Get());
+            }
+            plugin->m_scenery.groundEnabled=plugin->m_scenery.foliageEnabled=true;
+            CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHATESTENABLE,FALSE)));
+            CHECK(SUCCEEDED(device->SetTexture(0,nullptr)));
+            plugin->update_zone_profile(2);
+            CHECK(terrain.automatic().count()==0);
+            plugin->update_zone_profile(1);
+        }
+        std::puts("PASS: plugin ground draw reloads from disk on zone return and leaves unknown cutouts original.");
+    }
+};
+
+static void test_fixed_function_terrain(IDirect3DDevice8* device, IDirect3DTexture8* color,
+                                        const std::filesystem::path& dds, const std::filesystem::path& install)
 {
     TerrainMipmaps experiment;
     std::string message;
@@ -502,6 +565,10 @@ static void test_fixed_function_terrain(IDirect3DDevice8* device, IDirect3DTextu
     CHECK(SUCCEEDED(device->GetTexture(0, current.GetAddressOf())) && current.Get() == color);
     experiment.stop();
     std::puts("PASS: fixed-function terrain color mipmaps, blend, sampler restoration, and exclusion of other passes.");
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ZWRITEENABLE,TRUE)));
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE)));
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHATESTENABLE,FALSE)));
+    TerrainRoutingTest::run(device,dds,install / ("zone-cache-"+std::to_string(GetTickCount64())));
     test_camera_rotation_cache(device);
     test_large_rectangles(device);
 }
@@ -560,7 +627,7 @@ static void test_mipmaps(IDirect3DDevice8* device, const std::filesystem::path& 
     experiment.stop();
     CHECK(!experiment.draw(device, D3DPT_TRIANGLELIST, 0, 1));
     test_automatic_mips(device, experiment, folder, color, detail, install);
-    test_fixed_function_terrain(device, color);
+    test_fixed_function_terrain(device, color, folder / "pavement-a-color.dds", install);
 
     CHECK(SUCCEEDED(device->EndScene()));
     CHECK(SUCCEEDED(device->SetTexture(0, nullptr)));
@@ -571,6 +638,67 @@ static void test_mipmaps(IDirect3DDevice8* device, const std::filesystem::path& 
     CHECK(SUCCEEDED(device->SetStreamSource(0, nullptr, 0)));
     vb->Release();
     std::puts("PASS: DDS upload, color/pair draws, cache reuse, binding restoration, invalidation, off.");
+}
+
+// The same original texture is drawn as opaque ground and as an alpha cutout.
+static void test_scenery_switches(IDirect3DDevice8* device)
+{
+    Dxt3::Texture texture;
+    CHECK(SUCCEEDED(device->CreateTexture(32,32,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,texture.GetAddressOf())));
+    D3DLOCKED_RECT lock{};
+    CHECK(SUCCEEDED(texture->LockRect(0,&lock,nullptr,0)));
+    for (unsigned y=0;y<32;++y) {
+        auto row=reinterpret_cast<DWORD*>(static_cast<BYTE*>(lock.pBits)+y*lock.Pitch);
+        for (unsigned x=0;x<32;++x) row[x]=(x%2)?0xff448822:0;
+    }
+    CHECK(SUCCEEDED(texture->UnlockRect(0)));
+    CHECK(SUCCEEDED(device->SetTexture(0,texture.Get())));
+    CHECK(SUCCEEDED(device->SetPixelShader(0)));
+    CHECK(SUCCEEDED(device->SetVertexShader(D3DFVF_XYZ|D3DFVF_NORMAL|D3DFVF_DIFFUSE|D3DFVF_TEX1)));
+    CHECK(SUCCEEDED(device->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_MODULATE)));
+    CHECK(SUCCEEDED(device->SetTextureStageState(1,D3DTSS_COLOROP,D3DTOP_DISABLE)));
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHAFUNC,D3DCMP_GREATER)));
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHAREF,96)));
+    SceneryMipmaps scene;
+    auto draw=[&](bool cutout) {
+        CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHATESTENABLE,cutout)));
+        unsigned levels=0;
+        bool used=scene.draw(device,D3DPT_TRIANGLELIST,[&] {
+            Microsoft::WRL::ComPtr<IDirect3DBaseTexture8> bound;
+            CHECK(SUCCEEDED(device->GetTexture(0,bound.GetAddressOf())));
+            CHECK(bound && bound.Get()!=texture.Get() && bound->GetLevelCount()==6);
+            return S_OK;
+        },&levels);
+        CHECK(levels==(used?6u:0u));
+        Microsoft::WRL::ComPtr<IDirect3DBaseTexture8> restored;
+        CHECK(SUCCEEDED(device->GetTexture(0,restored.GetAddressOf())) && restored.Get()==texture.Get());
+        return used;
+    };
+    for (unsigned i=0;i<40;++i) {
+        draw(false);
+        draw(true);
+        scene.present(device);
+    }
+    CHECK(draw(false) && draw(true));
+    // Both replacement chains are warm: unsupported comparisons must use neither.
+    for (auto func : {D3DCMP_NOTEQUAL,D3DCMP_EQUAL,D3DCMP_LESS,D3DCMP_LESSEQUAL,
+                      D3DCMP_NEVER,D3DCMP_ALWAYS}) {
+        CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHAFUNC,func)));
+        for (bool ground : {false,true}) for (bool foliage : {false,true}) {
+            scene.groundEnabled=ground;
+            scene.foliageEnabled=foliage;
+            CHECK(!draw(true));
+        }
+    }
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHAFUNC,D3DCMP_GREATER)));
+    scene.foliageEnabled=false;
+    CHECK(draw(false) && !draw(true));
+    scene.groundEnabled=false;
+    scene.foliageEnabled=true;
+    CHECK(!draw(false) && draw(true));
+    CHECK(SUCCEEDED(device->SetTexture(0,nullptr)));
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHATESTENABLE,FALSE)));
+    std::puts("PASS: independent switches on a shared scenery texture.");
 }
 
 int main(int argc, char** argv)
@@ -597,6 +725,7 @@ int main(int argc, char** argv)
     HRESULT hr = d3d->CreateDevice(0, D3DDEVTYPE_HAL, window, D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &device);
     std::printf("CreateDevice HRESULT: %08lX\n", hr); CHECK(SUCCEEDED(hr));
     CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE)));
+    test_scenery_switches(device);
     if (argc == 4) test_mipmaps(device, argv[3], argv[1]);
     device->Release(); d3d->Release(); DestroyWindow(window); FreeLibrary(module);
     std::puts("PASS: Direct3D regression tests.");

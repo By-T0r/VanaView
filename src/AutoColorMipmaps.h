@@ -13,6 +13,7 @@
 // a copied BC2 payload and the buffers for its lower levels.
 class AutoColorMipmaps
 {
+    friend struct TerrainRoutingTest;
     using Source = Microsoft::WRL::ComPtr<IDirect3DBaseTexture8>;
     static constexpr size_t MaxBytes = 16 * 1024 * 1024;
     static constexpr size_t MaxDetailBytes = 4 * 1024 * 1024;
@@ -65,6 +66,7 @@ class AutoColorMipmaps
         size_t offset = 0;
         UINT level = 0;
         UINT row = 0;
+        bool diskHit = false;
     };
 
 public:
@@ -153,6 +155,17 @@ public:
         return describe_pass(device, D3DPT_TRIANGLELIST, false).shader;
     }
 
+    // Keep compatible fixed-function ground on its persistent cache while it warms.
+    static bool uses_fixed_ground_cache(IDirect3DDevice8* device, D3DPRIMITIVETYPE type)
+    {
+        if (type != D3DPT_TRIANGLESTRIP || !describe_pass(device, type, true).valid || !uses_mips(device))
+            return false;
+        Source color, detail;
+        D3DSURFACE_DESC desc{};
+        return SUCCEEDED(device->GetTexture(0, color.GetAddressOf())) && eligible_color(color.Get(), desc) &&
+            SUCCEEDED(device->GetTexture(1, detail.GetAddressOf())) && !detail;
+    }
+
     Selection select(IDirect3DDevice8* device, D3DPRIMITIVETYPE type, IDirect3DBaseTexture8* color, bool cacheOnly,
                      bool useDetail, bool useBlend)
     {
@@ -211,7 +224,8 @@ public:
     void present(IDirect3DDevice8* device)
     {
         const auto start = Clock::now();
-        const bool slowFrame = m_lastPresent != Clock::time_point{} && start - m_lastPresent > std::chrono::milliseconds(22);
+        const auto interval = start - m_lastPresent;
+        const bool slowFrame = m_lastPresent != Clock::time_point{} && interval > std::chrono::milliseconds(22);
         m_lastPresent = start;
         ++m_frame;
         m_attempts = 0;
@@ -224,6 +238,10 @@ public:
                 if (!m_candidate && !m_waiting.empty() && Clock::now() - start < PipelineBudget)
                     prepare_next();
                 m_nextWorkFrame = m_frame + 3;
+            } else if (can_advance_cached_color(interval, Clock::now() - start)) {
+                // Use an intervening frame for one upload step on a ready disk hit.
+                collect_prepared();
+                if (m_upload) advance_upload(device);
             } else {
                 ++m_stats.paced;
             }
@@ -352,13 +370,18 @@ private:
         m_waiting.push_back(std::move(item));
     }
 
+    static bool eligible_color(IDirect3DBaseTexture8* color, D3DSURFACE_DESC& desc)
+    {
+        return Dxt3::describe(color, desc) && eligible_dimension(desc.Width) &&
+            eligible_dimension(desc.Height) && size_t(desc.Width) * desc.Height <= MaxPixels;
+    }
+
     void consider(IDirect3DDevice8* device, D3DPRIMITIVETYPE type, IDirect3DBaseTexture8* color)
     {
         const auto& skip = skip_slot(color);
         if ((skip.color == color && skip.until > m_frame) || m_attempts >= 4) return;
         D3DSURFACE_DESC colorDesc{}, detailDesc{};
-        if (!Dxt3::describe(color, colorDesc) || !eligible_dimension(colorDesc.Width) ||
-            !eligible_dimension(colorDesc.Height) || size_t(colorDesc.Width) * colorDesc.Height > MaxPixels) {
+        if (!eligible_color(color, colorDesc)) {
             skip_slot(color) = {color, m_frame + 120};
             return;
         }
@@ -624,6 +647,15 @@ private:
         return true;
     }
 
+    bool can_advance_cached_color(Clock::duration interval, Clock::duration elapsed) const
+    {
+        if (m_firstUseThisFrame || interval > std::chrono::milliseconds(40) || elapsed >= PipelineBudget)
+            return false;
+        if (m_upload) return !m_upload->request.detail && m_upload->diskHit;
+        return m_candidate && !m_candidate->detail && m_buildDone.load(std::memory_order_acquire) &&
+            !m_buildFailed && m_diskWork.hit;
+    }
+
     void collect_prepared()
     {
         if (m_upload || !m_candidate || !m_buildDone.load(std::memory_order_acquire)) return;
@@ -640,6 +672,7 @@ private:
             return;
         }
         m_upload.emplace(Upload{std::move(*m_candidate), std::move(m_build->data), {}});
+        m_upload->diskHit = m_diskWork.hit;
         clear_builder();
     }
 

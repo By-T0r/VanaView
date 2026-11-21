@@ -15,6 +15,17 @@ build/
 /captures/
 /research-local/
 /PROJECT_MEMORY.md
+/research/
+/studies/
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.mp4
+*.mkv
+*.dds
+*.csv
+*.log
 *.etl
 __pycache__/
 

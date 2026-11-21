@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AutoColorMipmaps.h"
+#include "MipCoverage.h"
 
 #include <wrl/client.h>
 #include <algorithm>
@@ -34,6 +35,7 @@ class TerrainMipmaps
     };
 
 public:
+    MipCoverage coverage;
     enum class Mode { Off, Color, Pair, Auto };
     struct Stats
     {
@@ -122,8 +124,8 @@ public:
         set_detail(true);
         set_blend(true);
         message = set_linear(device, true)
-            ? "Ground mipmaps enabled with linear filtering."
-            : "Ground mipmaps enabled. The device does not support linear minification.";
+            ? "Scenery mipmaps enabled with linear filtering."
+            : "Scenery mipmaps enabled. The device does not support linear minification.";
         return true;
     }
 
@@ -196,7 +198,7 @@ public:
         if (m_mode == Mode::Auto) m_auto.present(device);
     }
 
-    bool draw(IDirect3DDevice8* device, D3DPRIMITIVETYPE type, UINT startVertex, UINT count)
+    bool draw(IDirect3DDevice8* device, D3DPRIMITIVETYPE type, UINT startVertex, UINT count, unsigned* actualLevels=nullptr)
     {
         if (m_mode == Mode::Off || m_paused || m_inDraw ||
             (type != D3DPT_TRIANGLELIST && !(m_mode == Mode::Auto && type == D3DPT_TRIANGLESTRIP))) return false;
@@ -210,6 +212,7 @@ public:
                                             selected.originalDetail, selected.detail);
             if (selected.firstUse) m_auto.finish_first_use(color.Get(), start, drawn, selected.detail != nullptr);
             if (drawn) {
+                if(actualLevels) *actualLevels=selected.texture->GetLevelCount();
                 if (selected.blended) {
                     ++m_stats.blend;
                     if (selected.detail) ++m_stats.blendDetail;
@@ -239,8 +242,10 @@ public:
         if (FAILED(device->GetTexture(1, detail.GetAddressOf())) ||
             !matches(detail.Get(), pair.detail, m_matches[i][1])) return false;
 
-        return replace_draw(device, type, startVertex, count, color.Get(), pair.color.texture.Get(),
+        const bool drawn=replace_draw(device, type, startVertex, count, color.Get(), pair.color.texture.Get(),
                             detail.Get(), m_mode == Mode::Pair ? pair.detail.texture.Get() : nullptr);
+        if(drawn && actualLevels) *actualLevels=pair.color.texture->GetLevelCount();
+        return drawn;
     }
 
 private:
@@ -325,7 +330,7 @@ private:
         }
 
         m_inDraw = true;
-        const HRESULT hr = device->DrawPrimitive(type, startVertex, count);
+        const HRESULT hr = coverage.submit(device,[&]{return device->DrawPrimitive(type, startVertex, count);});
         m_inDraw = false;
         const bool samplerRestored = edits.restore(device);
         restore(device, color, detail, useDetail);

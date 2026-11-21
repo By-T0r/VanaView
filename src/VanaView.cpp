@@ -4,6 +4,8 @@
 #include "Ashita.h"
 #include "TerrainMipmaps.h"
 #include "FogDistanceScale.h"
+#include "NormalShadows.h"
+#include "SceneryMipmaps.h"
 
 #include <algorithm>
 #include <atomic>
@@ -13,6 +15,8 @@
 #include <cstdio>
 #include <cstring>
 #include <utility>
+#include <mutex>
+#include <optional>
 
 #pragma comment(linker, "/EXPORT:expCreatePlugin=_expCreatePlugin@4")
 #pragma comment(linker, "/EXPORT:expDestroyPlugin=_expDestroyPlugin@4")
@@ -452,7 +456,7 @@ public:
     const char* GetAuthor(void) const override { return "rockerudon and By-T0r"; }
     const char* GetDescription(void) const override { return "Tunes world draw distance, map LoD, fog, and ground texture filtering."; }
     const char* GetLink(void) const override { return ""; }
-    double GetVersion(void) const override { return 1.77; }
+    double GetVersion(void) const override { return 1.99; }
 
     uint32_t GetFlags(void) const override
     {
@@ -475,25 +479,25 @@ public:
         load_config();
         m_mipStartupPending = true;
         update_current_zone();
+        m_scenery.clear();
         load_active_profile();
         refresh_ffximain();
-        refresh_drawdistance_pointers();
-        capture_original_draw_distances();
-        apply_draw_distances();
+        schedule_zone_distance();
         apply_lod_mode();
-        apply_active_fog_mode();
         m_terrainGroupsEnabled = ::GetPrivateProfileIntA("terrain_groups", "enabled", 1, m_configPath) != 0;
         if (m_terrainGroupsEnabled) {
             m_terrainGroupsEnabled = install_terrain_group_hook();
             update_terrain_group_zone(get_current_zone());
         }
         set_prop_range(read_profile_float("props", "range", kDefaultPropRange));
-        chat("VanaView loaded. Original plugin by rockerudon. Fork development by By-T0r. Use /vv to configure.");
+        chat("VanaView %.2f loaded. Use /vv to configure.", GetVersion());
         return true;
     }
 
     void Release(void) override
     {
+        m_scenery.clear();
+        if (!m_shadows.reset(shadow_client())) chat("Could not restore native shadows; restart the client.");
         restore_patch(m_terrainRangePatch);
         ::InterlockedExchange(&g_terrainGroupPolicy, 0);
         restore_patch(m_terrainGroupPatch);
@@ -511,6 +515,7 @@ public:
     bool Direct3DInitialize(IDirect3DDevice8* device) override
     {
         m_mipmaps.stop();
+        m_scenery.clear();
         m_device = device;
         m_mipStartupPending = true;
         return true;
@@ -536,6 +541,14 @@ public:
             return true;
         }
 
+        if (iequals(sub,"grass") || iequals(sub,"flowers") || iequals(sub,"fan") || iequals(sub,"palm")) {
+            const char* arg=strtok_s(nullptr," \t",&context);
+            if(!arg || iequals(arg,"status")) queue_mip_settings();
+            else if(iequals(arg,"on")) queue_mip_settings({}, true);
+            else if(iequals(arg,"off")) queue_mip_settings({}, false);
+            else chat("Use /vv %s on | off | status (shared foliage setting).", sub);
+            return true;
+        }
         if (iequals(sub, "help"))
         {
             print_help();
@@ -575,15 +588,23 @@ public:
             return true;
         }
 
+        if (iequals(sub,"coverage")) {
+            const char* arg=strtok_s(nullptr," \t",&context);
+            if(!arg) m_coverageRequest.store(1);
+            else if(iequals(arg,"on")) m_coverageRequest.store(2);
+            else if(iequals(arg,"off")) m_coverageRequest.store(3);
+            else if(iequals(arg,"status")) m_coverageRequest.store(4);
+            else chat("Usage: /vv coverage [on|off|status]");
+            return true;
+        }
         if (iequals(sub, "mip"))
         {
             const char* action = strtok_s(nullptr, " \t", &context);
             if (!action || iequals(action, "status")) {
-                auto pending = MipCommand::None;
-                m_mipCommand.compare_exchange_strong(pending, MipCommand::Status);
+                queue_mip_settings();
             }
-            else if (iequals(action, "on")) m_mipCommand.store(MipCommand::On);
-            else if (iequals(action, "off")) m_mipCommand.store(MipCommand::Off);
+            else if (iequals(action, "on")) queue_mip_settings(true, true);
+            else if (iequals(action, "off")) queue_mip_settings(false, false);
             else chat("/vv mip on | off | status");
             return true;
         }
@@ -724,6 +745,14 @@ public:
 
     void Direct3DBeginScene(bool isRenderingBackBuffer) override
     {
+        if (m_shadows.simple || m_shadows.requested!=shadows::TerrainRange::Native || m_shadowUpdate) {
+            m_shadowUpdate=false;
+            auto* client=shadow_client();
+            if (!m_shadows.sync(client, GetModuleHandleW(L"NormalShadows.dll")!=nullptr)) {
+                if (!m_shadows.reset(client)) chat("Could not restore native shadows; restart the client.");
+                chat("Shadow override unavailable. Unload standalone NormalShadows and check the client version.");
+            }
+        }
         if (m_terrainGroupPatch.patched && isRenderingBackBuffer)
             update_terrain_group_zone(get_current_zone());
 
@@ -736,24 +765,103 @@ public:
         UNREFERENCED_PARAMETER(hDestWindowOverride);
         UNREFERENCED_PARAMETER(pDirtyRegion);
 
-        update_zone_profile();
+        update_zone_profile(get_current_zone());
+        if (m_zoneDistancePending) {
+            const auto now=GetTickCount64();
+            if (now>=m_zoneDistanceNextCheck)
+                finish_zone_distance(local_player_ready(),now);
+        }
         try {
             m_mipmaps.present(m_device);
+            if(m_mipmaps.mode()==TerrainMipmaps::Mode::Auto) m_scenery.present(m_device);
         } catch (...) {
             m_mipmaps.stop();
             chat("Automatic mipmaps stopped: could not prepare the texture cache.");
         }
         process_mip_command();
+        if(int request=m_coverageRequest.exchange(0)) {
+            auto& coverage=m_mipmaps.coverage;
+            if(request!=4) {
+                bool enable=request==1?!coverage.enabled:request==2;
+                D3DCAPS8 caps{};
+                if(enable && (!m_device || FAILED(m_device->GetDeviceCaps(&caps)) ||
+                   !(caps.RasterCaps&D3DPRASTERCAPS_FOGTABLE))) {
+                    chat("Coverage marking unavailable: pixel fog unsupported.");
+                    enable=false;
+                }
+                coverage.enabled=enable;coverage.marked=coverage.errors=0;
+            }
+            chat("Coverage %s: green = VanaView mip draw. Marked %u, errors %u.",
+                 coverage.enabled?"on":"off",coverage.marked,coverage.errors);
+        }
         render_window();
     }
 
     bool Direct3DDrawPrimitive(D3DPRIMITIVETYPE primitiveType, UINT startVertex, UINT primitiveCount) override
     {
-        return m_mipmaps.draw(m_device, primitiveType, startVertex, primitiveCount);
+        DWORD shader=0;
+        if (m_device && m_scenery.groundEnabled && m_mipmaps.mode()==TerrainMipmaps::Mode::Auto &&
+            SUCCEEDED(m_device->GetPixelShader(&shader))) {
+            if (!shader && AutoColorMipmaps::uses_fixed_ground_cache(m_device,primitiveType))
+                return m_mipmaps.draw(m_device,primitiveType,startVertex,primitiveCount);
+            if (shader && m_mipmaps.draw(m_device,primitiveType,startVertex,primitiveCount))
+                return true;
+        }
+        return draw_scenery(primitiveType,[&]{return m_device->DrawPrimitive(primitiveType,startVertex,primitiveCount);});
+    }
+
+    bool Direct3DDrawIndexedPrimitive(D3DPRIMITIVETYPE type, UINT minIndex, UINT vertices, UINT start, UINT count) override
+    {
+        return draw_scenery(type,[&]{return m_device->DrawIndexedPrimitive(type,minIndex,vertices,start,count);});
+    }
+    bool Direct3DDrawPrimitiveUP(D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) override
+    {
+        return draw_scenery(type,[&]{return m_device->DrawPrimitiveUP(type,count,data,stride);});
+    }
+    bool Direct3DDrawIndexedPrimitiveUP(D3DPRIMITIVETYPE type, UINT first, UINT vertices, UINT count,
+        const void* indices, D3DFORMAT format, const void* data, UINT stride) override
+    {
+        return draw_scenery(type,[&]{return m_device->DrawIndexedPrimitiveUP(type,first,vertices,count,indices,format,data,stride);});
     }
 
 private:
-    enum class MipCommand { None, On, Off, Status };
+    std::atomic<int> m_coverageRequest{0};
+    SceneryMipmaps m_scenery;
+    template<class Draw>
+    bool draw_scenery(D3DPRIMITIVETYPE type,Draw submit) {
+        if(m_mipmaps.mode()!=TerrainMipmaps::Mode::Auto || !m_currentZoneId) {
+            return false;
+        }
+        try {
+            auto markedDraw=[&]{return m_mipmaps.coverage.submit(m_device,submit);};
+            return m_scenery.draw(m_device,type,markedDraw);
+        }
+        catch(const std::bad_alloc&) { m_scenery.clear(); return false; }
+    }
+    static std::uint8_t* shadow_client() {
+        return reinterpret_cast<std::uint8_t*>(GetModuleHandleW(L"FFXiMain.dll"));
+    }
+    shadows::NormalShadows m_shadows;
+    bool m_shadowUpdate=false;
+    void save_shadow_settings() {
+        if (!::WritePrivateProfileStringA("shadows","simple",m_shadows.simple?"1":"0",m_configPath) ||
+            !::WritePrivateProfileStringA("shadows","full_range",m_shadows.requested==shadows::TerrainRange::Full?"1":"0",m_configPath))
+            chat("Could not save shadow settings.");
+    }
+
+    friend struct MipCommandTest;
+    friend struct TerrainRoutingTest;
+    struct MipRequest {
+        std::optional<bool> ground, foliage;
+        bool report=false;
+    };
+    void queue_mip_settings(std::optional<bool> ground={}, std::optional<bool> foliage={})
+    {
+        std::lock_guard lock(m_mipMutex);
+        if (ground.has_value()) m_mipRequest.ground=ground;
+        if (foliage.has_value()) m_mipRequest.foliage=foliage;
+        m_mipRequest.report=true;
+    }
 
     void start_ground_mipmaps()
     {
@@ -763,37 +871,46 @@ private:
             if (!message.empty()) chat("%s", message.c_str());
         } catch (...) {
             m_mipmaps.stop();
-            chat("Ground mipmaps could not initialize.");
+            chat("Scenery mipmaps could not initialize.");
         }
     }
 
-    void save_mip_preference(bool enabled)
+    void save_mip_preference(const char* key, bool enabled)
     {
-        m_mipEnabled = enabled;
-        if (!::WritePrivateProfileStringA("mipmaps", "enabled", enabled ? "1" : "0", m_configPath))
-            chat("Could not save the ground mipmap preference.");
+        if (!::WritePrivateProfileStringA("mipmaps", key, enabled ? "1" : "0", m_configPath))
+            chat("Could not save the scenery mipmap preference.");
     }
 
     void process_mip_command()
     {
-        const auto command = m_mipCommand.exchange(MipCommand::None);
-        if (m_device && std::exchange(m_mipStartupPending, false) && m_mipEnabled &&
-            command != MipCommand::On && command != MipCommand::Off)
-            start_ground_mipmaps();
-        if (command == MipCommand::None) return;
-        if (command == MipCommand::On) {
-            save_mip_preference(true);
-            if (m_device) start_ground_mipmaps();
-            else m_mipStartupPending = true;
-            return;
+        MipRequest request;
+        {
+            std::lock_guard lock(m_mipMutex);
+            request=std::exchange(m_mipRequest, MipRequest{});
         }
-        if (command == MipCommand::Off) {
-            m_mipmaps.stop();
-            save_mip_preference(false);
-            return;
+        if (request.ground.has_value()) {
+            m_scenery.groundEnabled=*request.ground;
+            save_mip_preference("ground", *request.ground);
+            m_mipStartupPending=true;
         }
-        chat("Terrain mipmaps %s (%u cached textures).", m_mipEnabled ? "on" : "off",
-            static_cast<unsigned>(m_mipmaps.automatic().count()));
+        if (request.foliage.has_value()) {
+            m_scenery.foliageEnabled=*request.foliage;
+            save_mip_preference("foliage", *request.foliage);
+            m_mipStartupPending=true;
+        }
+        if (m_device && std::exchange(m_mipStartupPending, false)) {
+            if (m_scenery.groundEnabled || m_scenery.foliageEnabled) {
+                if (m_mipmaps.mode() != TerrainMipmaps::Mode::Auto) start_ground_mipmaps();
+            } else {
+                m_mipmaps.stop();
+                m_scenery.clear();
+            }
+        }
+        if (!request.report) return;
+        chat("Scenery mipmaps %s (ground %s, foliage %s): %llu chains, %llu scenery draws (%llu alpha-tested), %llu terrain draws, %llu errors.",
+            m_mipmaps.mode()==TerrainMipmaps::Mode::Auto?"active":"inactive",
+            m_scenery.groundEnabled?"on":"off",m_scenery.foliageEnabled?"on":"off",
+            m_scenery.generated,m_scenery.draws,m_scenery.cutouts,m_mipmaps.stats().color,m_scenery.failed);
     }
 
     enum class FogMode : int
@@ -806,6 +923,7 @@ private:
     {
         chat("/vv proprange <1-4> | off | status");
         print_terrain_group_help();
+        chat("/vv coverage [on|off|status] - highlight mipmapped draws");
         chat("/vv opens the configuration window");
         chat("/vv distance <1-40> | default");
         chat("/vv lod full | game");
@@ -813,7 +931,8 @@ private:
         chat("/vv zone on | off | status");
         chat("/vv reset");
         chat("/vv status");
-        chat("/vv mip [on|off|status] - ground mipmaps and startup preference");
+        chat("/vv mip [on|off|status] - both ground and foliage mipmaps");
+        chat("/vv grass|flowers|fan|palm on/off - shared foliage mipmap setting");
     }
 
     void print_status()
@@ -995,11 +1114,32 @@ private:
             if (gui->Checkbox("Extend distant terrain", &groups))
                 set_terrain_groups_enabled(groups);
             show_help_marker(gui, "Keeps distant terrain visible when turning the camera on supported maps.");
-            bool terrainMipmaps = m_mipEnabled;
-            if (gui->Checkbox("Terrain mipmaps", &terrainMipmaps))
-                m_mipCommand.store(terrainMipmaps ? MipCommand::On : MipCommand::Off);
-            show_help_marker(gui, "Reduces distant terrain shimmer. This setting applies immediately and is saved for all zones.");
+            if (gui->Checkbox("Ground mipmaps", &m_scenery.groundEnabled)) {
+                save_mip_preference("ground", m_scenery.groundEnabled);
+                m_mipStartupPending=true;
+            }
+            show_help_marker(gui, "Ground and other scenery without an alpha cutout.");
+            if (gui->Checkbox("Foliage mipmaps", &m_scenery.foliageEnabled)) {
+                save_mip_preference("foliage", m_scenery.foliageEnabled);
+                m_mipStartupPending=true;
+            }
+            show_help_marker(gui, "Grass, leaves, flowers and other scenery using the same alpha cutout.");
 
+            gui->Separator();
+            gui->Text("Shadows");
+            bool shadowsChanged=gui->Checkbox("Simple actor shadows in Normal", &m_shadows.simple);
+            show_help_marker(gui,"Uses simple actor shadows in the game's Normal mode. High and Off follow the game.");
+            gui->Text("Terrain shadow range");
+            show_help_marker(gui,"Native follows the terrain up to 20 units. Full follows it at all visible distances in Normal mode.");
+            int shadowRange=static_cast<int>(m_shadows.requested);
+            shadowsChanged=gui->RadioButton("Native##shadowRange",&shadowRange,static_cast<int>(shadows::TerrainRange::Native)) || shadowsChanged;
+            gui->SameLine();
+            shadowsChanged=gui->RadioButton("Full##shadowRange",&shadowRange,static_cast<int>(shadows::TerrainRange::Full)) || shadowsChanged;
+            if (shadowsChanged) {
+                m_shadows.requested=static_cast<shadows::TerrainRange>(shadowRange);
+                m_shadowUpdate=true;
+                save_shadow_settings();
+            }
             gui->Separator();
             if (gui->CollapsingHeader("Zone settings")) {
                 bool profiles = m_useZoneProfiles;
@@ -1076,7 +1216,11 @@ private:
 
     void load_config()
     {
-        m_mipEnabled = ::GetPrivateProfileIntA("mipmaps", "enabled", 1, m_configPath) != 0;
+        m_shadows.simple=::GetPrivateProfileIntA("shadows","simple",shadows::NormalShadows::defaultSimple,m_configPath)!=0;
+        m_shadows.requested=::GetPrivateProfileIntA("shadows","full_range",1,m_configPath) ? shadows::TerrainRange::Full : shadows::TerrainRange::Native;
+        const int legacyMipmaps = ::GetPrivateProfileIntA("mipmaps", "enabled", 1, m_configPath);
+        m_scenery.groundEnabled = ::GetPrivateProfileIntA("mipmaps", "ground", legacyMipmaps, m_configPath) != 0;
+        m_scenery.foliageEnabled = ::GetPrivateProfileIntA("mipmaps", "foliage", legacyMipmaps, m_configPath) != 0;
         const int configVersion = ::GetPrivateProfileIntA("general", "version", 0, m_configPath);
         if (configVersion < 1)
         {
@@ -1247,10 +1391,8 @@ private:
 
     bool apply_draw_distances()
     {
-        if (!refresh_drawdistance_pointers())
+        if (!capture_original_draw_distances())
             return false;
-
-        capture_original_draw_distances();
         return safe_write(m_worldDistanceAddress, m_drawDistance) &&
             safe_write(m_entityDistanceAddress, m_drawDistance);
     }
@@ -1324,11 +1466,15 @@ private:
 
     void restore_default_runtime()
     {
+        m_shadows.simple=shadows::NormalShadows::defaultSimple;
+        m_shadows.requested=shadows::NormalShadows::defaultRange;
+        m_shadowUpdate=true;
+        save_shadow_settings();
         reset_config_to_defaults();
         apply_draw_distances();
         apply_lod_mode();
         apply_active_fog_mode();
-        m_mipCommand.store(MipCommand::On);
+        queue_mip_settings(true, true);
         set_terrain_groups_enabled(true);
         save_prop_range(kDefaultPropRange);
     }
@@ -1362,22 +1508,56 @@ private:
         apply_active_fog_mode();
     }
 
-    void update_zone_profile()
+    bool local_player_ready() const
     {
-        const uint16_t zoneId = get_current_zone();
-        if (zoneId == 0 || zoneId == m_currentZoneId)
+        auto* memory=m_core ? m_core->GetMemoryManager() : nullptr;
+        auto* party=memory ? memory->GetParty() : nullptr;
+        if (!party || !party->GetMemberZone(0) || !party->GetMemberIsActive(0)) return false;
+        const auto index=party->GetMemberTargetIndex(0);
+        return index && memory->GetEntity() && memory->GetEntity()->GetRawEntity(index);
+    }
+
+    void schedule_zone_distance()
+    {
+        m_zoneDistancePending=true;
+        m_zoneDistanceNextCheck=0;
+        m_zoneDistanceFailures=0;
+    }
+
+    void finish_zone_distance(bool ready, uint64_t now)
+    {
+        if (!m_zoneDistancePending) return;
+        m_zoneDistanceNextCheck=now+500;
+        if (!ready) return;
+        if (apply_draw_distances()) {
+            m_zoneDistancePending=false;
+            apply_active_fog_mode();
+        } else if (++m_zoneDistanceFailures>=3) {
+            m_zoneDistancePending=false;
+            chat("Could not apply draw distance after entering the zone.");
+        }
+    }
+
+    void update_zone_profile(uint16_t zoneId)
+    {
+        if (zoneId == 0) {
+            if (!m_zoneDistancePending) schedule_zone_distance();
             return;
+        }
+        if (zoneId == m_currentZoneId) return;
 
         if (m_useZoneProfiles && m_currentZoneId != 0 && m_activeZoneHasProfile)
             save_zone_profile(m_currentZoneId);
 
         m_currentZoneId = zoneId;
+        m_scenery.clear();
         m_mipmaps.zone_changed();
         if (m_useZoneProfiles)
         {
             load_active_profile();
-            apply_loaded_profile();
+            apply_lod_mode();
         }
+        schedule_zone_distance();
     }
 
     void set_zone_profiles_enabled(const bool enabled)
@@ -1610,8 +1790,8 @@ private:
 
     TerrainMipmaps m_mipmaps;
     BytesPatchSite m_fogScaleWorld{}, m_fogScaleEntity{};
-    std::atomic<MipCommand> m_mipCommand{MipCommand::None};
-    bool m_mipEnabled = true;
+    std::mutex m_mipMutex;
+    MipRequest m_mipRequest;
     bool m_mipStartupPending = false;
     IAshitaCore* m_core = nullptr;
     IDirect3DDevice8* m_device = nullptr;
@@ -1619,6 +1799,9 @@ private:
     uint32_t m_ffxiMainSize = 0;
     uintptr_t m_worldDistanceAddress = 0;
     uintptr_t m_entityDistanceAddress = 0;
+    bool m_zoneDistancePending=false;
+    uint64_t m_zoneDistanceNextCheck=0;
+    unsigned m_zoneDistanceFailures=0;
     bool m_originalDrawCaptured = false;
     float m_originalWorldDistance = 0.0f;
     float m_originalEntityDistance = 0.0f;
