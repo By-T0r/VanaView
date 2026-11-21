@@ -49,7 +49,7 @@ Use `/vv help` for chat commands. For example, `/vv proprange 1.5` sets global o
 
 ## Reporting a stutter
 
-If the game stutters, open `/vv` and click **Save diagnostic report** soon after it happens. Chat shows the filename under `logs/VanaView` in your Ashita folder. The text file includes up to the last 900 frame intervals (about 30 seconds at 30 FPS), zone IDs, graphics settings and mipmap cache counters. You can review it and attach it to your issue with a short description of what you were doing, such as entering a zone or fighting in a party. Sharing is manual.
+If the game stutters, open `/vv` and click **Save diagnostic report** soon after it happens. After a successful save, the button shows **Report saved** and stays disabled for two seconds. Chat shows the filename under `logs/VanaView` in your Ashita folder. The text file includes up to the last 900 frame intervals (about 30 seconds at 30 FPS), zone IDs, graphics settings and mipmap cache counters. You can review it and attach it to your issue with a short description of what you were doing, such as entering a zone or fighting in a party. Sharing is manual.
 
 ## Scope for server administrators
 

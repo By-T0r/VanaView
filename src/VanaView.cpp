@@ -1171,18 +1171,25 @@ private:
             const float left = gui->GetCursorPosX();
             const float saveWidth = std::max(48.0f * scale, buttonWidth("Save"));
             const float settingsWidth = buttonWidth("Restore defaults") + style.ItemSpacing.x + saveWidth;
-            if (gui->Button("Save diagnostic report", ImVec2(0.0f, 0.0f))) {
+            const auto reportTime = FrameClock::now();
+            const bool reportSaved = reportTime < m_nextReportTime;
+            const float reportWidth = buttonWidth("Save diagnostic report");
+            gui->BeginDisabled(reportSaved);
+            const bool saveReport = gui->Button(reportSaved ? "Report saved###diagnosticReport" :
+                "Save diagnostic report###diagnosticReport", ImVec2(reportWidth, 0.0f));
+            gui->EndDisabled();
+            if (saveReport) {
                 try {
                     const auto install = m_core->GetInstallPath();
                     if (!install || !*install) throw std::runtime_error("Missing install directory");
                     const auto path = save_diagnostic_report(std::filesystem::path(install) /
-                        "logs" / "VanaView");
-                    chat("Report saved: logs/VanaView/%s", path.filename().string().c_str());
+                        "logs" / "VanaView", reportTime);
+                    if (!path.empty()) chat("Report saved: logs/VanaView/%s", path.filename().string().c_str());
                 } catch (const std::exception&) {
                     chat("Could not save the diagnostic report. Check write access to logs/VanaView and free disk space.");
                 }
             }
-            if (buttonWidth("Save diagnostic report") + 2.0f * style.ItemSpacing.x + settingsWidth <= available)
+            if (reportWidth + 2.0f * style.ItemSpacing.x + settingsWidth <= available)
                 gui->SameLine(left + available - settingsWidth);
             else if (settingsWidth <= available)
                 gui->SetCursorPosX(left + available - settingsWidth);
@@ -1230,6 +1237,7 @@ private:
     size_t m_frameNext = 0, m_frameCount = 0;
     FrameClock::time_point m_previousPresent{};
     unsigned m_reportNumber = 0;
+    FrameClock::time_point m_nextReportTime = FrameClock::time_point::min();
 
     void remember_frame(FrameClock::time_point now, uint16_t zone)
     {
@@ -1242,8 +1250,9 @@ private:
         m_previousPresent = now;
     }
 
-    std::filesystem::path save_diagnostic_report(const std::filesystem::path& directory)
+    std::filesystem::path save_diagnostic_report(const std::filesystem::path& directory, FrameClock::time_point requestedAt)
     {
+        if (requestedAt < m_nextReportTime) return {};
         SYSTEMTIME t{};
         GetLocalTime(&t);
         char name[96]{};
@@ -1296,6 +1305,7 @@ private:
             std::filesystem::remove(path, ignored);
             throw;
         }
+        m_nextReportTime = FrameClock::now() + std::chrono::seconds(2);
         return path;
     }
 
