@@ -1258,7 +1258,7 @@ private:
         try {
             out << "VanaView " << std::fixed << std::setprecision(2) << GetVersion()
                 << " diagnostic report\nZone: " << m_currentZoneId
-                << "\nDraw distance: " << m_drawDistance << "  Object range: " << m_propRange
+                << "\nDraw distance: " << std::lround(draw_distance_to_slider(m_drawDistance)) << "  Object range: " << m_propRange
                 << "\nFog: " << (m_fogMode == FogMode::Game ? "Game" : "Distance")
                 << "  Simple shadows: " << (m_shadows.simple ? "on" : "off")
                 << "  Terrain shadow range: " << (m_shadows.requested == shadows::TerrainRange::Full ? "Full" : "Native")
@@ -1278,7 +1278,8 @@ private:
                 sorted.reserve(m_frameCount);
                 for (size_t i = 0; i < m_frameCount; ++i) sorted.push_back(m_recentFrames[i].ms);
                 std::sort(sorted.begin(), sorted.end());
-                out << "Median/p99/max (ms): " << sorted[(m_frameCount-1)/2] << " / "
+                const double median = (sorted[(m_frameCount - 1) / 2] + sorted[m_frameCount / 2]) / 2.0;
+                out << "Median/p99/max (ms): " << median << " / "
                     << sorted[m_frameCount - m_frameCount/100 - 1] << " / " << sorted.back()
                     << "\nOldest first: zone,interval_ms\n";
                 const auto start = (m_frameNext + m_recentFrames.size() - m_frameCount) % m_recentFrames.size();
