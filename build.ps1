@@ -7,6 +7,13 @@
 # Set ASHITA_SDK to the Ashita plugin SDK folder that contains Ashita.h.
 # FFXI is a 32-bit process, so this builds x86.
 
+param(
+    [switch]$Test,
+    [string]$D3D8,
+    [string]$TerrainFixtures,
+    [string]$FogImage,
+    [string[]]$ShadowImages
+)
 $ErrorActionPreference = 'Stop'
 
 $root     = $PSScriptRoot
@@ -49,6 +56,13 @@ $clArgs = @(
     "/Fo:`"$obj`"",
     "`"$src`""
     '/link',
+    '/Brepro',
+    '/NODEFAULTLIB:libci.lib',
+    '/NODEFAULTLIB:libc.lib',
+    'legacy_stdio_definitions.lib',
+    'advapi32.lib',
+    'gdi32.lib',
+    "`"$sdk/d3d8/lib/d3dx8.lib`"",
     "/IMPLIB:`"$buildDir\VanaView.lib`""
 ) -join ' '
 
@@ -60,5 +74,37 @@ if ($LASTEXITCODE -ne 0) {
 
 & (Join-Path $root 'tools\Test-Plugin.ps1') -PluginPath $outDll
 
-Write-Host "Built: $outDll"
+Write-Host "Built Release plugin: $outDll"
 Write-Host 'Copy it to Ashita/plugins/ and load it in game with: /load vanaview'
+
+if ($Test) {
+    $names = @('Test-MipCommands', 'Test-Rendering')
+    if ($FogImage) { $names += 'Test-FogScale' }
+    if ($ShadowImages) { $names += 'Test-NormalShadows' }
+    foreach ($name in $names) {
+        $source = Join-Path $root "tools/$name.cpp"
+        $exe = Join-Path $buildDir "$name.exe"
+        $object = Join-Path $buildDir "$name.obj"
+        $argsCl = "/nologo /std:c++20 /EHa /O2 /MT /D_CRT_SECURE_NO_WARNINGS /I`"$sdk`" /Fo:`"$object`" /Fe:`"$exe`" `"$source`" /link /NODEFAULTLIB:libci.lib /NODEFAULTLIB:libc.lib user32.lib advapi32.lib gdi32.lib legacy_stdio_definitions.lib `"$sdk/d3d8/lib/d3dx8.lib`""
+        cmd.exe /c "`"$vcvars`" >nul && cl.exe $argsCl"
+        if ($LASTEXITCODE) { throw "Compilation failed for $name" }
+        $arguments = @()
+        if ($name -eq 'Test-Rendering') {
+            $arguments += $buildDir
+            if ($D3D8) { $arguments += $D3D8 }
+            elseif ($TerrainFixtures) { $arguments += 'd3d8.dll' }
+            if ($TerrainFixtures) { $arguments += $TerrainFixtures }
+        } elseif ($name -eq 'Test-FogScale') {
+            $arguments += $FogImage
+        }
+        if ($name -eq 'Test-NormalShadows') {
+            foreach ($image in $ShadowImages) {
+                & $exe $image
+                if ($LASTEXITCODE) { throw "$name failed for $image" }
+            }
+            continue
+        }
+        & $exe @arguments
+        if ($LASTEXITCODE) { throw "$name failed ($LASTEXITCODE)" }
+    }
+}

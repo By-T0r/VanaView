@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <d3d8/includes/d3d8.h>
 #include "../src/TerrainMipmaps.h"
+#include "../src/SceneryMipmaps.h"
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); std::exit(1); } } while (0)
 
@@ -573,6 +574,56 @@ static void test_mipmaps(IDirect3DDevice8* device, const std::filesystem::path& 
     std::puts("PASS: DDS upload, color/pair draws, cache reuse, binding restoration, invalidation, off.");
 }
 
+// The same original texture is drawn as opaque ground and as an alpha cutout.
+static void test_scenery_switches(IDirect3DDevice8* device)
+{
+    Dxt3::Texture texture;
+    CHECK(SUCCEEDED(device->CreateTexture(32,32,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,texture.GetAddressOf())));
+    D3DLOCKED_RECT lock{};
+    CHECK(SUCCEEDED(texture->LockRect(0,&lock,nullptr,0)));
+    for (unsigned y=0;y<32;++y) {
+        auto row=reinterpret_cast<DWORD*>(static_cast<BYTE*>(lock.pBits)+y*lock.Pitch);
+        for (unsigned x=0;x<32;++x) row[x]=(x%2)?0xff448822:0;
+    }
+    CHECK(SUCCEEDED(texture->UnlockRect(0)));
+    CHECK(SUCCEEDED(device->SetTexture(0,texture.Get())));
+    CHECK(SUCCEEDED(device->SetPixelShader(0)));
+    CHECK(SUCCEEDED(device->SetVertexShader(D3DFVF_XYZ|D3DFVF_NORMAL|D3DFVF_DIFFUSE|D3DFVF_TEX1)));
+    CHECK(SUCCEEDED(device->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_MODULATE)));
+    CHECK(SUCCEEDED(device->SetTextureStageState(1,D3DTSS_COLOROP,D3DTOP_DISABLE)));
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHAFUNC,D3DCMP_GREATER)));
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHAREF,96)));
+    SceneryMipmaps scene;
+    auto draw=[&](bool cutout) {
+        CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHATESTENABLE,cutout)));
+        unsigned levels=0;
+        bool used=scene.draw(device,D3DPT_TRIANGLELIST,[&] {
+            Microsoft::WRL::ComPtr<IDirect3DBaseTexture8> bound;
+            CHECK(SUCCEEDED(device->GetTexture(0,bound.GetAddressOf())));
+            CHECK(bound && bound.Get()!=texture.Get() && bound->GetLevelCount()==6);
+            return S_OK;
+        },&levels);
+        CHECK(levels==(used?6u:0u));
+        Microsoft::WRL::ComPtr<IDirect3DBaseTexture8> restored;
+        CHECK(SUCCEEDED(device->GetTexture(0,restored.GetAddressOf())) && restored.Get()==texture.Get());
+        return used;
+    };
+    for (unsigned i=0;i<40;++i) {
+        draw(false);
+        draw(true);
+        scene.present(device);
+    }
+    CHECK(draw(false) && draw(true));
+    scene.foliageEnabled=false;
+    CHECK(draw(false) && !draw(true));
+    scene.groundEnabled=false;
+    scene.foliageEnabled=true;
+    CHECK(!draw(false) && draw(true));
+    CHECK(SUCCEEDED(device->SetTexture(0,nullptr)));
+    CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ALPHATESTENABLE,FALSE)));
+    std::puts("PASS: independent switches on a shared scenery texture.");
+}
+
 int main(int argc, char** argv)
 {
     CHECK(argc >= 2 && argc <= 4);
@@ -597,6 +648,7 @@ int main(int argc, char** argv)
     HRESULT hr = d3d->CreateDevice(0, D3DDEVTYPE_HAL, window, D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &device);
     std::printf("CreateDevice HRESULT: %08lX\n", hr); CHECK(SUCCEEDED(hr));
     CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE)));
+    test_scenery_switches(device);
     if (argc == 4) test_mipmaps(device, argv[3], argv[1]);
     device->Release(); d3d->Release(); DestroyWindow(window); FreeLibrary(module);
     std::puts("PASS: Direct3D regression tests.");
