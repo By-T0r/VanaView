@@ -104,7 +104,7 @@ public:
 private:
     using Path = std::filesystem::path;
     using FileTime = std::filesystem::file_time_type;
-    static constexpr unsigned Buckets = 80, Ways = 4;
+    static constexpr unsigned Buckets = 80, Ways = 5;
     // Reserve space for metadata and one staged payload during replacement.
     static constexpr uintmax_t PayloadBudget = Budget - 1024 * 1024;
     static constexpr uint32_t Signature = 0x314D5656; // VVM1

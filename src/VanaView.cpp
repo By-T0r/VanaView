@@ -15,6 +15,9 @@
 #include <cstdio>
 #include <cstring>
 #include <utility>
+#include <fstream>
+#include <iomanip>
+#include <stdexcept>
 #include <mutex>
 #include <optional>
 
@@ -456,7 +459,7 @@ public:
     const char* GetAuthor(void) const override { return "rockerudon and By-T0r"; }
     const char* GetDescription(void) const override { return "Tunes world draw distance, map LoD, fog, and ground texture filtering."; }
     const char* GetLink(void) const override { return ""; }
-    double GetVersion(void) const override { return 1.99; }
+    double GetVersion(void) const override { return 2.0; }
 
     uint32_t GetFlags(void) const override
     {
@@ -765,7 +768,10 @@ public:
         UNREFERENCED_PARAMETER(hDestWindowOverride);
         UNREFERENCED_PARAMETER(pDirtyRegion);
 
-        update_zone_profile(get_current_zone());
+        const auto presentTime = FrameClock::now();
+        const auto zone = get_current_zone();
+        remember_frame(presentTime, zone);
+        update_zone_profile(zone);
         if (m_zoneDistancePending) {
             const auto now=GetTickCount64();
             if (now>=m_zoneDistanceNextCheck)
@@ -1154,19 +1160,59 @@ private:
                         handle_terrain_groups("zone", excluded ? "off" : "default");
                 }
             }
-            if (gui->Button("Restore defaults", ImVec2(0.0f, 0.0f)))
-            {
-                restore_default_runtime();
-                changed = true;
+            gui->Spacing();
+            gui->Separator();
+            gui->Spacing();
+            const auto& style = gui->GetStyle();
+            const auto buttonWidth = [&](const char* label) {
+                return gui->CalcTextSize(label).x + 2.0f * style.FramePadding.x;
+            };
+            const float available = gui->GetContentRegionAvail().x;
+            const float left = gui->GetCursorPosX();
+            const float saveWidth = std::max(48.0f * scale, buttonWidth("Save"));
+            const float settingsWidth = buttonWidth("Restore defaults") + style.ItemSpacing.x + saveWidth;
+            if (gui->Button("Save diagnostic report", ImVec2(0.0f, 0.0f))) {
+                try {
+                    const auto install = m_core->GetInstallPath();
+                    if (!install || !*install) throw std::runtime_error("Missing install directory");
+                    const auto path = save_diagnostic_report(std::filesystem::path(install) /
+                        "logs" / "VanaView");
+                    chat("Report saved: logs/VanaView/%s", path.filename().string().c_str());
+                } catch (const std::exception&) {
+                    chat("Could not save the diagnostic report. Check write access to logs/VanaView and free disk space.");
+                }
             }
+            if (buttonWidth("Save diagnostic report") + 2.0f * style.ItemSpacing.x + settingsWidth <= available)
+                gui->SameLine(left + available - settingsWidth);
+            else if (settingsWidth <= available)
+                gui->SetCursorPosX(left + available - settingsWidth);
+            constexpr auto resetDialog = "Restore VanaView defaults?";
+            if (gui->Button("Restore defaults", ImVec2(0.0f, 0.0f)))
+                gui->OpenPopup(resetDialog);
 
-            gui->SameLine();
-            if (gui->Button("Save", ImVec2(80.0f, 0.0f)))
+            if (settingsWidth <= available) gui->SameLine();
+            if (gui->Button("Save", ImVec2(saveWidth, 0.0f)))
             {
                 save_config();
                 chat("Settings saved.");
             }
 
+            if (gui->BeginPopupModal(resetDialog, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                gui->TextUnformatted("Reset visibility, terrain, mipmaps and shadows?");
+                gui->TextUnformatted("This also turns off zone profiles.");
+                gui->Spacing();
+                const bool cancel = gui->Button("Cancel") || gui->IsKeyPressed(ImGuiKey_Escape, false);
+                gui->SetItemDefaultFocus();
+                gui->SameLine();
+                if (gui->Button("Restore defaults") && !cancel) {
+                    restore_default_runtime();
+                    changed = true;
+                    gui->CloseCurrentPopup();
+                } else if (cancel) {
+                    gui->CloseCurrentPopup();
+                }
+                gui->EndPopup();
+            }
             if (changed)
                 save_config();
         }
@@ -1176,6 +1222,80 @@ private:
         m_windowOpen = open;
         if (themeCount > 0)
             gui->PopStyleColor(themeCount);
+    }
+
+    using FrameClock = std::chrono::steady_clock;
+    struct FrameSample { double ms; uint16_t zone; };
+    std::array<FrameSample, 900> m_recentFrames{};
+    size_t m_frameNext = 0, m_frameCount = 0;
+    FrameClock::time_point m_previousPresent{};
+    unsigned m_reportNumber = 0;
+
+    void remember_frame(FrameClock::time_point now, uint16_t zone)
+    {
+        if (m_previousPresent != FrameClock::time_point{}) {
+            m_recentFrames[m_frameNext] = {
+                std::chrono::duration<double, std::milli>(now - m_previousPresent).count(), zone};
+            m_frameNext = (m_frameNext + 1) % m_recentFrames.size();
+            m_frameCount = std::min(m_frameCount + 1, m_recentFrames.size());
+        }
+        m_previousPresent = now;
+    }
+
+    std::filesystem::path save_diagnostic_report(const std::filesystem::path& directory)
+    {
+        SYSTEMTIME t{};
+        GetLocalTime(&t);
+        char name[96]{};
+        std::snprintf(name, sizeof(name), "VanaView-%04u%02u%02u-%02u%02u%02u-%lu-%u.txt",
+            t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond,
+            GetCurrentProcessId(), ++m_reportNumber);
+        std::filesystem::create_directories(directory);
+        const auto path = directory / name;
+        std::ofstream out;
+        out.exceptions(std::ios::badbit | std::ios::failbit);
+        out.open(path);
+        try {
+            out << "VanaView " << std::fixed << std::setprecision(2) << GetVersion()
+                << " diagnostic report\nZone: " << m_currentZoneId
+                << "\nDraw distance: " << m_drawDistance << "  Object range: " << m_propRange
+                << "\nFog: " << (m_fogMode == FogMode::Game ? "Game" : "Distance")
+                << "  Simple shadows: " << (m_shadows.simple ? "on" : "off")
+                << "  Terrain shadow range: " << (m_shadows.requested == shadows::TerrainRange::Full ? "Full" : "Native")
+                << "\nGround mipmaps: " << (m_scenery.groundEnabled ? "on" : "off")
+                << "  Foliage mipmaps: " << (m_scenery.foliageEnabled ? "on" : "off")
+                << "  Coverage overlay: " << (m_mipmaps.coverage.enabled ? "on" : "off") << '\n';
+            const auto& cache = m_mipmaps.automatic();
+            const auto& stats = cache.stats();
+            out << "Ground textures ready: " << cache.count() << "  Queued: " << cache.waiting()
+                << "  Preparing: " << cache.preparing() << "  Uploading: " << cache.uploading()
+                << "\nGround disk cache hits/misses/writes/errors: " << stats.diskHits << '/'
+                << stats.diskMisses << '/' << stats.diskWrites << '/' << stats.diskErrors
+                << "\nScenery mip chains generated/failed: " << m_scenery.generated << '/' << m_scenery.failed
+                << "\nRecent Present intervals (includes loading and pauses): " << m_frameCount << '\n';
+            if (m_frameCount) {
+                std::vector<double> sorted;
+                sorted.reserve(m_frameCount);
+                for (size_t i = 0; i < m_frameCount; ++i) sorted.push_back(m_recentFrames[i].ms);
+                std::sort(sorted.begin(), sorted.end());
+                out << "Median/p99/max (ms): " << sorted[(m_frameCount-1)/2] << " / "
+                    << sorted[m_frameCount - m_frameCount/100 - 1] << " / " << sorted.back()
+                    << "\nOldest first: zone,interval_ms\n";
+                const auto start = (m_frameNext + m_recentFrames.size() - m_frameCount) % m_recentFrames.size();
+                for (size_t i = 0; i < m_frameCount; ++i) {
+                    const auto& sample = m_recentFrames[(start + i) % m_recentFrames.size()];
+                    out << sample.zone << ',' << sample.ms << '\n';
+                }
+            }
+            out.close();
+        } catch (...) {
+            out.exceptions(std::ios::goodbit);
+            if (out.is_open()) out.close();
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+            throw;
+        }
+        return path;
     }
 
     void print_fog_status()

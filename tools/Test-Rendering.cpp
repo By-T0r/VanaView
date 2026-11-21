@@ -61,19 +61,37 @@ static void test_disk_cache(const std::filesystem::path& install)
     CHECK(MipmapDiskCache::load(dir, hot, reopened, true));
     CHECK(MipmapDiskCache::load(dir, hot, reopened, true));
     for (unsigned i = 2; i <= 4; ++i) CHECK(MipmapDiskCache::store(dir, id + i * 80, built));
-    // The legacy/corrupted slot has the lowest score in this bucket.
-    CHECK(MipmapDiskCache::load(dir, id + 320, reopened));
+    const auto fifth = dir / ("mip-" + std::to_string(bucket) + "-4.bc2");
+    CHECK(std::filesystem::exists(fifth));
+    for (unsigned i = 1; i <= 4; ++i)
+        CHECK(MipmapDiskCache::load(dir, id + i * 80, reopened) && reopened.data == built.data);
+    // The sixth insertion replaces the damaged, unranked first entry.
     CHECK(MipmapDiskCache::store(dir, id + 5 * 80, built));
     CHECK(MipmapDiskCache::load(dir, hot, reopened));
     unsigned remaining = 0;
     for (unsigned i = 1; i <= 5; ++i)
         remaining += MipmapDiskCache::load(dir, id + i * 80, reopened);
-    CHECK(remaining == 4);
+    CHECK(remaining == 5);
 
-    const auto oversized = dir / ("mip-" + std::to_string((bucket + 1) % 80) + "-0.bc2");
-    std::ofstream(oversized, std::ios::binary).close();
-    std::filesystem::resize_file(oversized, MipmapDiskCache::Budget);
-    CHECK(MipmapDiskCache::trim(dir) && !std::filesystem::exists(oversized));
+    static_assert(MipmapDiskCache::Budget == 64 * 1024 * 1024);
+    // A fifth slot in another group counts towards the shared limit both
+    // during startup trimming and when making room for a new entry.
+    const auto oversized = dir / ("mip-" + std::to_string((bucket + 1) % 80) + "-4.bc2");
+    auto sidecar = oversized;
+    sidecar.replace_extension(".use");
+    for (bool onStore : {false, true}) {
+        std::ofstream(oversized, std::ios::binary).close();
+        std::ofstream(sidecar, std::ios::binary).close();
+        std::filesystem::resize_file(oversized, MipmapDiskCache::Budget);
+        if (onStore) {
+            CHECK(MipmapDiskCache::store(dir, id + 2, built));
+            CHECK(MipmapDiskCache::load(dir, id + 2, reopened));
+        } else {
+            CHECK(MipmapDiskCache::trim(dir));
+        }
+        CHECK(!std::filesystem::exists(oversized) && !std::filesystem::exists(sidecar));
+        CHECK(MipmapDiskCache::load(dir, id + 320, reopened));
+    }
     CHECK(MipmapDiskCache::load(dir, hot, reopened));
     for (const auto& entry : std::filesystem::directory_iterator(dir))
         CHECK(std::filesystem::remove(entry.path()));
