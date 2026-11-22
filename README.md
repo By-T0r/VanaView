@@ -43,7 +43,7 @@ Both screenshots use a CRT filter.
 
 | Sunlight through the canopy | A sapling encounter in the rain |
 | --- | --- |
-| [![Sun low behind a stand of trees with a ridge on the left](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/9c73856395a38448e86ba3004f1f0daf208285c4/sunlit-canopy-preview.png)](https://gist.github.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4#file-sunlit-canopy-png) | [![A player facing a sapling in a dark, rainy clearing](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/01dd3344dcfaa109d45f0d4358713159f93e4404/woodland-encounter-preview.png)](https://gist.github.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4#file-woodland-encounter-png) |
+| [![Sun low behind a stand of trees with a ridge on the left](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/9c73856395a38448e86ba3004f1f0daf208285c4/sunlit-canopy-preview.png)](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/fd941f55a4965bd113b6536b44403a045aec9e4d/sunlit-canopy.webp) | [![A player facing a sapling in a dark, rainy clearing](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/01dd3344dcfaa109d45f0d4358713159f93e4404/woodland-encounter-preview.png)](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/a1384604aa496c5c6c65af5ca5c908ba184c3fff/woodland-encounter.webp) |
 
 ## Install
 
