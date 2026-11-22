@@ -15,6 +15,36 @@ Open `/vv` to adjust these settings while looking at the scene. The window scale
 
 **Phoenix players** should disable **Phoenix Lighting** before loading VanaView. The two plugins are incompatible.
 
+## In-game screenshots
+
+### Fog in La Theine Plateau
+
+Look at the orange trees on the left and the ridge beyond the fence. With **Distance** fog, you can see farther through the rain. With **Game** fog, the trees fade into the mist. Draw distance is set to 20 in both shots.
+
+| Distance fog | Game fog |
+| --- | --- |
+| [![Orange trees and a distant ridge visible through the rain](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/41dc9b9823621ce0a5f66515b8164b0402d21212/plateau-distance-preview.png)](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/995e5054569452c03f96c9d6b2aaa1ee87ccb076/plateau-distance.png) | [![The same tree line fading into the mist](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/22d23628b467d413c715fcf7a6a92cdc4244ffd1/plateau-game-preview.png)](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/0937c2c989d11ec3468352ca369987f38e195481/plateau-game.png) |
+| 1× object range, Game LoD, mipmaps off | 2× object range, Full LoD, mipmaps on |
+
+### Scenery detail in East Ronfaure
+
+Follow the path as it bends between the trees. With the higher object range and Full LoD, more trunks and undergrowth are visible along the bend. Both shots use Game fog.
+
+| 1× object range · Game LoD | 2× object range · Full LoD |
+| --- | --- |
+| [![Forest path with fewer trees around the bend](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/4724ec66858db776447a3146e3b7adc154ea3829/forest-game-preview.png)](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/25697a93ea4f09fb67d6dd86b4ef254f74ec77f2/forest-game.png) | [![Additional trunks and undergrowth along the same path](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/38cc28e8c711c63ed645bbf5ea8d1b732cb4086f/forest-full-preview.png)](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/f00d4e9693fd01dd13814ff4f270861ac9f495ef/forest-full.png) |
+| Ground and foliage mipmaps off | Ground and foliage mipmaps on |
+
+VanaView builds missing mipmaps from the original game textures. The reduction in shimmer is easiest to see in game as you move the camera past leaves or look along the ground.
+
+### Around Vana’diel
+
+Both screenshots use a CRT filter.
+
+| Sunlight through the canopy | A sapling encounter in the rain |
+| --- | --- |
+| [![Sun low behind a stand of trees with a ridge on the left](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/9c73856395a38448e86ba3004f1f0daf208285c4/sunlit-canopy-preview.png)](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/050886ad4efa1e99fbf46e34b06ce7ce079ff5c7/sunlit-canopy.png) | [![A player facing a sapling in a dark, rainy clearing](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/01dd3344dcfaa109d45f0d4358713159f93e4404/woodland-encounter-preview.png)](https://gist.githubusercontent.com/By-T0r/eec3906fc83c1fe9d019cf0ec0b0d1e4/raw/d247df74bcfc59d349c508e24bee36cf6c5fc7e4/woodland-encounter.png) |
+
 ## Install
 
 1. Download **VanaView.dll** from the [latest release](https://github.com/By-T0r/VanaView/releases/latest).
