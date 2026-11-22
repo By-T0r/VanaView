@@ -47,8 +47,8 @@ Both screenshots use a CRT filter.
 
 ## Install
 
-1. Download **VanaView.dll** from the [latest release](https://github.com/By-T0r/VanaView/releases/latest).
-2. Copy the DLL into the Ashita `plugins` directory. If the plugin is already loaded, run `/unload vanaview` before replacing the DLL.
+1. Download [VanaView-2.0.zip](https://github.com/By-T0r/VanaView/releases/download/v2.0/VanaView-2.0.zip).
+2. Extract the ZIP directly into your Ashita folder. It already contains `plugins/VanaView.dll`. If VanaView is currently loaded, run `/unload vanaview` before extracting.
 3. Run `/load vanaview`, then `/vv`.
 
 VanaView 2.0 reuses your existing ground mipmap cache. Each cache group can now keep a fifth texture, reducing the need to rebuild mipmaps when you revisit a zone. The disk limit remains 64 MiB.
