@@ -5,6 +5,38 @@
 struct MipCommandTest {
     static void run(const char* path) {
         auto plugin=std::make_unique<VanaView>();
+        // Model Ashita's documented priority ordering and stop-on-handled dispatch.
+        // Both load orders must block the Lua callback, including injected commands.
+        CHECK(plugin->GetPriority() < 0);
+        for (bool addonLoadedFirst : {false, true}) {
+            for (bool injected : {false, true}) {
+                for (const char* text : {"/drawdistance setworld 20", "/drawdistance setmob 20",
+                    "/drawdistance", "/drawdistance help", "  /DRAWDISTANCE\tsete 2",
+                    "/addon load drawdistance", "/addon reload drawdistance",
+                    "/ADDON LOAD \"DrawDistance\"", "/addon load drawdistance.lua",
+                    "/addon load \"drawdistance/drawdistance.lua\""}) {
+                    struct Handler { int priority; bool vanaview; };
+                    std::array<Handler,2> handlers{{{plugin->GetPriority(),true},{0,false}}};
+                    if (addonLoadedFirst) std::swap(handlers[0],handlers[1]);
+                    std::stable_sort(handlers.begin(),handlers.end(),[](auto a,auto b){return a.priority<b.priority;});
+                    bool addonCalled=false, blocked=false;
+                    for (auto handler : handlers) {
+                        if (handler.vanaview) blocked=plugin->HandleCommand(0,text,injected);
+                        else addonCalled=true;
+                        if (blocked) break;
+                    }
+                    CHECK(blocked && !addonCalled);
+                }
+            }
+        }
+        CHECK(plugin->HandleCommand(0,(std::string("/addon load ")+std::string(700,' ')+"drawdistance").c_str(),true));
+        CHECK(!plugin->HandleCommand(0,nullptr,false));
+        for (const char* text : {"", "/distance", "/drawdistance2 setworld 20",
+            "/addon load distance", "/addon reload distance", "/addon unload drawdistance",
+            "/addon list", "/addon load drawdistance-extra", "/echo drawdistance", "/load portfix"})
+            CHECK(!plugin->HandleCommand(0,text,false));
+        // Blocking never captures or writes the shared client distance values.
+        CHECK(!plugin->m_originalDrawCaptured && !plugin->m_worldDistanceAddress && !plugin->m_entityDistanceAddress);
         // Exercise the same writer as the menu, including before the second Present.
         const std::filesystem::path folder = std::string(path) + "-reports";
         using namespace std::chrono_literals;
@@ -35,7 +67,7 @@ struct MipCommandTest {
         CHECK(report != empty);
         std::ifstream in(report);
         const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-        CHECK(text.find("VanaView 2.10 diagnostic report") != std::string::npos);
+        CHECK(text.find("VanaView 2.11 diagnostic report") != std::string::npos);
         CHECK(text.find("pauses): 900") != std::string::npos);
         CHECK(text.find("\nDraw distance: 20  Object range: ") != std::string::npos);
         CHECK(text.find("Median/p99/max (ms): 30.00 / 40.00 / 90.00") != std::string::npos);

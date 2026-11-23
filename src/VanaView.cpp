@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <mutex>
 #include <optional>
+#include <string_view>
 
 #pragma comment(linker, "/EXPORT:expCreatePlugin=_expCreatePlugin@4")
 #pragma comment(linker, "/EXPORT:expDestroyPlugin=_expDestroyPlugin@4")
@@ -221,6 +222,45 @@ namespace
         ::VirtualProtect(reinterpret_cast<void*>(site.address), site.length, oldProtect, &unused);
         site = {};
         return true;
+    }
+
+    // Parse only the tokens needed for the conflict guard, without truncating commands.
+    std::string_view next_command_token(std::string_view& rest)
+    {
+        while (!rest.empty() && std::isspace(static_cast<unsigned char>(rest.front())))
+            rest.remove_prefix(1);
+        const bool quoted = !rest.empty() && rest.front() == '"';
+        if (quoted) rest.remove_prefix(1);
+        size_t length = 0;
+        while (length < rest.size() && (quoted ? rest[length] != '"' :
+            !std::isspace(static_cast<unsigned char>(rest[length])))) ++length;
+        const auto token = rest.substr(0, length);
+        rest.remove_prefix(length);
+        if (quoted && !rest.empty()) rest.remove_prefix(1);
+        return token;
+    }
+
+    bool command_token_equals(std::string_view token, std::string_view expected)
+    {
+        return token.size() == expected.size() && std::equal(token.begin(), token.end(),
+            expected.begin(), [](unsigned char a, unsigned char b) {
+                return std::tolower(a) == std::tolower(b);
+            });
+    }
+
+    bool conflicts_with_drawdistance(const char* command)
+    {
+        if (!command) return false;
+        std::string_view rest(command);
+        const auto first = next_command_token(rest);
+        if (command_token_equals(first, "/drawdistance")) return true;
+        if (!command_token_equals(first, "/addon")) return false;
+        const auto action = next_command_token(rest);
+        if (!command_token_equals(action, "load") && !command_token_equals(action, "reload")) return false;
+        auto name = next_command_token(rest);
+        const auto slash = name.find_last_of("/\\");
+        if (slash != std::string_view::npos) name.remove_prefix(slash + 1);
+        return command_token_equals(name, "drawdistance") || command_token_equals(name, "drawdistance.lua");
     }
 
     bool iequals(const char* a, const char* b)
@@ -459,7 +499,9 @@ public:
     const char* GetAuthor(void) const override { return "rockerudon and By-T0r"; }
     const char* GetDescription(void) const override { return "Tunes world draw distance, map LoD, fog, and ground texture filtering."; }
     const char* GetLink(void) const override { return ""; }
-    double GetVersion(void) const override { return 2.1; }
+    double GetVersion(void) const override { return 2.11; }
+    // The standard Addons plugin uses priority 0. Block conflicting commands before Lua runs.
+    int32_t GetPriority(void) const override { return -1; }
 
     uint32_t GetFlags(void) const override
     {
@@ -528,6 +570,10 @@ public:
     {
         if (command == nullptr)
             return false;
+        if (conflicts_with_drawdistance(command)) {
+            chat("drawdistance is incompatible with VanaView. Use /vv for draw distance; /addon unload drawdistance to unload the addon.");
+            return true;
+        }
 
         char buffer[512]{};
         std::snprintf(buffer, sizeof(buffer), "%s", command);
