@@ -47,11 +47,13 @@ Both screenshots use a CRT filter.
 
 ## Install
 
-1. Download [VanaView-2.0.zip](https://github.com/By-T0r/VanaView/releases/download/v2.0/VanaView-2.0.zip).
+1. Download [VanaView-2.1.zip](https://github.com/By-T0r/VanaView/releases/download/v2.1/VanaView-2.1.zip).
 2. Extract the ZIP directly into your Ashita folder. It already contains `plugins/VanaView.dll`. If VanaView is currently loaded, run `/unload vanaview` before extracting.
 3. Run `/load vanaview`, then `/vv`.
 
-VanaView 2.0 reuses your existing ground mipmap cache. Each cache group can now keep a fifth texture, reducing the need to rebuild mipmaps when you revisit a zone. The disk limit remains 64 MiB.
+VanaView 2.1 reduces dark edges on mipmapped foliage by filling transparent edge colors in generated mip levels. Foliage coverage preservation remains enabled automatically, keeping fine leaf and petal details. **Foliage mipmaps** is on by default; existing saved preferences are respected.
+
+VanaView reuses your existing ground mipmap cache. Each cache group can keep a fifth texture, reducing the need to rebuild mipmaps when you revisit a zone. The disk limit remains 64 MiB.
 
 ## Configuration
 
@@ -63,7 +65,7 @@ VanaView 2.0 reuses your existing ground mipmap cache. Each cache group can now 
 | Fog | Game | Game preserves the original weather-dependent fog distance. Distance makes fog follow the draw distance setting. Existing Custom profiles use Game. |
 | Extend distant terrain | On | Helps prevent distant scenery from disappearing as the camera turns. Applies on maps with compatible terrain groups and a spatial tree. |
 | Ground mipmaps | On | Generates missing mipmaps for ground and other supported scenery without an alpha cutout. |
-| Foliage mipmaps | On | Independently controls supported alpha-cutout scenery, including leaves, flowers, grass and objects that use the same cutout. Both settings persist. Use `/vv mip on/off` to switch both together. |
+| Foliage mipmaps | On | Independently controls supported alpha-cutout scenery, including leaves, flowers, grass and objects that use the same cutout. Coverage preservation and transparent edge color filling are automatic. Both settings persist. Use `/vv mip on/off` to switch both together. |
 | Simple actor shadows in Normal | On | Uses simple character shadows when the game is set to Normal. High uses the game’s detailed shadows and Off disables them. |
 | Terrain shadow range | Full | In Normal mode, Native uses the game’s terrain-following range. Full extends it to all visible distances. |
 
@@ -96,6 +98,8 @@ The plugin entry point, commands and rendering hooks are in [VanaView.cpp](src/V
 Set `ASHITA_SDK` to the directory containing `Ashita.h` for plugin interface 4.30. Run `./build.ps1` with Visual Studio 2022 x86 C++ build tools installed. The script builds `dist/VanaView.dll` and checks its exports and plugin interface.
 
 Run `./build.ps1 -Test` for the command, configuration and Direct3D regressions. Optional inputs are `-D3D8` (an x86 D3D8 wrapper), `-TerrainFixtures` (the pavement DDS test set), `-FogImage` (the mapped client image for fog), and `-ShadowImages` (the mapped client images for shadows, supplied as a PowerShell array).
+
+The foliage suite includes synthetic edge-color, alpha, ground-isolation and interrupted-build checks. To compare full chains against external reference data, set `VV_FOLIAGE_FIXTURES` to a directory of `*-source.dds` files and `VV_FOLIAGE_EXPECTED` to a separate directory containing the expected mip chains with matching filenames. Test assets are not included in the repository.
 
 ### Verify a release
 

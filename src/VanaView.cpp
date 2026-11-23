@@ -459,7 +459,7 @@ public:
     const char* GetAuthor(void) const override { return "rockerudon and By-T0r"; }
     const char* GetDescription(void) const override { return "Tunes world draw distance, map LoD, fog, and ground texture filtering."; }
     const char* GetLink(void) const override { return ""; }
-    double GetVersion(void) const override { return 2.0; }
+    double GetVersion(void) const override { return 2.1; }
 
     uint32_t GetFlags(void) const override
     {
@@ -1129,7 +1129,7 @@ private:
                 save_mip_preference("foliage", m_scenery.foliageEnabled);
                 m_mipStartupPending=true;
             }
-            show_help_marker(gui, "Grass, leaves, flowers and other scenery using the same alpha cutout.");
+            show_help_marker(gui, "Reduces shimmer on grass, leaves and flowers.");
 
             gui->Separator();
             gui->Text("Shadows");

@@ -35,7 +35,7 @@ struct MipCommandTest {
         CHECK(report != empty);
         std::ifstream in(report);
         const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-        CHECK(text.find("VanaView 2.00 diagnostic report") != std::string::npos);
+        CHECK(text.find("VanaView 2.10 diagnostic report") != std::string::npos);
         CHECK(text.find("pauses): 900") != std::string::npos);
         CHECK(text.find("\nDraw distance: 20  Object range: ") != std::string::npos);
         CHECK(text.find("Median/p99/max (ms): 30.00 / 40.00 / 90.00") != std::string::npos);
