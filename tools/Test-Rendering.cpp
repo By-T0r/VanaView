@@ -3,6 +3,8 @@
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); std::exit(1); } } while (0)
 
+#include "Test-FoliageEdges.h"
+
 static void test_bc2_generation()
 {
     // Two hand-encoded BC2 blocks: red with alpha 0 and blue with alpha 255.
@@ -744,6 +746,7 @@ int main(int argc, char** argv)
     std::printf("CreateDevice HRESULT: %08lX\n", hr); CHECK(SUCCEEDED(hr));
     CHECK(SUCCEEDED(device->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE)));
     test_scenery_switches(device);
+    test_foliage_edges(device);
     if (argc == 4) test_mipmaps(device, argv[3], argv[1]);
     device->Release(); d3d->Release(); DestroyWindow(window); FreeLibrary(module);
     std::puts("PASS: Direct3D regression tests.");

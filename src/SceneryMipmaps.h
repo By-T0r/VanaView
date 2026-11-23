@@ -24,7 +24,7 @@ class SceneryMipmaps {
         size_t bytes=0;
         double coverage=0, scale=1;
         UINT row=0;
-        bool scaling=false;
+        bool scaling=false,padding=false;
         uint64_t passed=0;
         std::array<unsigned,256> histogram{};
         bool failed=false;
@@ -62,9 +62,41 @@ class SceneryMipmaps {
         if(func==D3DCMP_GREATEREQUAL && ref<=255) return ref;
         return std::nullopt;
     }
+    static bool pad_lower_edges(Entry& e) {
+        if(!e.next) return false;
+        const UINT level=e.next;
+        D3DSURFACE_DESC desc{};
+        D3DLOCKED_RECT lock{};
+        if(FAILED(e.chain->GetLevelDesc(e.next,&desc)) ||
+           FAILED(e.chain->LockRect(e.next,&lock,nullptr,0))) return false;
+        auto row=[&](UINT y){return reinterpret_cast<DWORD*>(static_cast<BYTE*>(lock.pBits)+size_t(y)*lock.Pitch);};
+        const UINT end=std::min(desc.Height,e.row+std::max(1u,1024u/desc.Width));
+        for(UINT y=e.row;y<end;++y) for(UINT x=0;x<desc.Width;++x) {
+            auto& pixel=row(y)[x];
+            if(pixel>>24) continue;
+            unsigned sums[3]{},count=0;
+            for(UINT yy=y?y-1:0;yy<std::min(desc.Height,y+2);++yy)
+                for(UINT xx=x?x-1:0;xx<std::min(desc.Width,x+2);++xx) {
+                    const DWORD neighbor=row(yy)[xx];
+                    if(!(neighbor>>24)) continue;
+                    ++count;
+                    for(unsigned c=0;c<3;++c) sums[c]+=(neighbor>>(8*c))&255;
+                }
+            // Only alpha-positive donors: in-place filling cannot propagate
+            // through transparent space or depend on row/chunk order.
+            if(count) {
+                pixel=0;
+                for(unsigned c=0;c<3;++c) pixel|=((sums[c]+count/2)/count)<<(8*c);
+            }
+        }
+        e.row=end;
+        if(end==desc.Height) {++e.next;e.row=0;e.padding=false;}
+        return SUCCEEDED(e.chain->UnlockRect(level));
+    }
     // Downsample in premultiplied colour. For a cutout, rescale alpha toward
     // the fraction of top-level texels that pass the draw's threshold.
     static bool lower(Entry& e) {
+        if(e.padding) return pad_lower_edges(e);
         UINT level=e.next;
         D3DSURFACE_DESC a{},b{};
         if(FAILED(e.chain->GetLevelDesc(level-1,&a)) || FAILED(e.chain->GetLevelDesc(level,&b))) return false;
@@ -111,7 +143,9 @@ class SceneryMipmaps {
         }
         e.row=end;
         if(end==b.Height) {
-            ++e.next;e.row=0;e.scaling=false;e.histogram={};
+            if(e.cutoff) e.padding=true;
+            else ++e.next;
+            e.row=0;e.scaling=false;e.histogram={};
         }
         HRESULT h=e.chain->UnlockRect(level);
         return SUCCEEDED(e.chain->UnlockRect(level-1)) && SUCCEEDED(h);
@@ -147,7 +181,7 @@ class SceneryMipmaps {
         return SUCCEEDED(t->UnlockRect(0)) && valid;
     }
     static void restart(Entry& e) {
-        e.chain.Reset();e.next=0;e.row=0;e.histogram={};e.scaling=false;e.passed=0;
+        e.chain.Reset();e.next=0;e.row=0;e.histogram={};e.scaling=false;e.padding=false;e.passed=0;
     }
     static bool top(IDirect3DDevice8* d,Entry& e) {
         Surface from,to;
