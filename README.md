@@ -6,6 +6,14 @@ VanaView is a graphics plugin for Final Fantasy XI on Ashita v4. It lets you see
 
 > **Do not use the `drawdistance` addon with VanaView.** Use VanaView alone to control draw distance. Running both can cause conflicting settings, addon load errors or a client crash. Remove `drawdistance` from your startup script and unload it with `/addon unload drawdistance` before loading VanaView. The separate `distance` addon, which displays the distance to your target, is unaffected.
 
+### Drawdistance compatibility
+
+VanaView 2.11 blocks `/drawdistance` commands and attempts to load or reload that addon while VanaView is loaded. This applies in both **Game** and **Distance** fog modes. Use `/vv` to adjust draw distance instead.
+
+If `drawdistance` was already loaded, its commands are still blocked, but VanaView does not unload it automatically or undo changes it made beforehand. Run `/addon unload drawdistance` and remove it from your startup script. If you already changed distances with the addon in the current session, restart the game with only VanaView controlling draw distance so those earlier values are not carried over.
+
+The separate `distance` addon remains compatible. VanaView's draw distance, object range and fog controls continue to work normally.
+
 ## Install or update
 
 1. Download the `VanaView-<version>.zip` asset from the [latest release](https://github.com/By-T0r/VanaView/releases/latest).
