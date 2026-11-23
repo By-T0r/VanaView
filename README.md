@@ -4,6 +4,8 @@ VanaView is a graphics plugin for Final Fantasy XI on Ashita v4. It lets you see
 
 > **Phoenix players.** VanaView is approved for use on the Phoenix server. Disable **Phoenix Lighting** before loading VanaView. The two plugins are incompatible.
 
+> **Do not use the `drawdistance` addon with VanaView.** Use VanaView alone to control draw distance. Running both can cause conflicting settings, addon load errors or a client crash. Remove `drawdistance` from your startup script and unload it with `/addon unload drawdistance` before loading VanaView. The separate `distance` addon, which displays the distance to your target, is unaffected.
+
 ## Install or update
 
 1. Download the `VanaView-<version>.zip` asset from the [latest release](https://github.com/By-T0r/VanaView/releases/latest).
