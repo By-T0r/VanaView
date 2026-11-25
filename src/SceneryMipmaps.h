@@ -230,6 +230,13 @@ class SceneryMipmaps {
 public:
     bool groundEnabled=true, foliageEnabled=true;
     uint64_t generated=0,draws=0,cutouts=0,failed=0;
+    bool pending() const {
+        for (const auto& [key,e] : cache) {
+            if (e.failed || (e.cutoff && !foliageEnabled)) continue;
+            if (!e.chain || e.next<e.chain->GetLevelCount()) return true;
+        }
+        return false;
+    }
     void clear(){
         cache.clear();bytes=0;frame=generated=draws=cutouts=failed=0;admitted=false;restoreFailed=false;}
     void present(IDirect3DDevice8* d) {

@@ -6,7 +6,7 @@ namespace shadows {
 class NormalShadows {
 public:
     using Range = TerrainRange;
-    static constexpr bool defaultSimple=true;
+    static constexpr bool defaultSimple=false;
     static constexpr Range defaultRange=Range::Full;
     bool simple=defaultSimple;
     Range requested=defaultRange;

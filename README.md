@@ -20,18 +20,22 @@ The separate `distance` addon remains compatible. VanaView's draw distance, obje
 2. If VanaView is loaded, run `/unload vanaview`. Extract the ZIP into your Ashita folder. It already contains `plugins/VanaView.dll`.
 3. Run `/load vanaview`, then `/vv` to open the settings in game.
 
+The settings window starts with plain-language descriptions. Open **Quick guide** for a short guide, or enable **Technical descriptions** at the bottom to show the names used below. This display preference is saved automatically for the next load and does not save the graphics profile. Keep **Draw distance** at **20 or lower** and **Object range** at **1.50x or lower** to limit the risk of low FPS.
+
+Use **Disable effects** / **Enable effects** in the footer for a temporary comparison. This suspends VanaView effects without changing your saved profile or pending edits. Other plugins and graphics wrappers remain active. Reloading VanaView enables its effects again. The button waits at least three seconds between clicks and, with effects on, until queued mipmaps finish. Keep the camera still for the comparison.
+
 ## What VanaView changes
 
 ### Visibility and map detail
 
 | Setting | Default | What it changes |
 | --- | --- | --- |
-| **Draw distance** | 20 | Sets how far the client draws the world and entities it already has, such as players and monsters. The slider runs from 1 to 40 in whole steps. |
+| **Draw distance** | 20 | Adjusts scenery draw distance. The slider runs from 1 to 40 in whole steps; 20 or lower is recommended. |
 | **Object range** | 1× | Extends the distance at which map objects such as trees and bushes appear. You can adjust it independently of **Draw distance**, from 1× to 4× in 0.25× steps. |
 | **Map LoD** | Full | **Full** uses the most detailed model available for visible map objects, reducing sudden changes as you approach. **Game** switches between models at the usual distances. |
 | **Extend distant terrain** | On | On compatible maps, helps keep distant terrain in view as you turn the camera. For example, it can keep the mountains northwest of the Crag of Dem in view from more angles at Konschtat Highlands (H-6). |
 
-Higher **Draw distance** and **Object range** can lower FPS, especially in areas with dense scenery.
+Higher **Draw distance** and **Object range** can lower FPS, especially in areas with dense scenery. **Object range above 1.50× is not recommended.**
 
 ### Texture shimmer
 
@@ -45,16 +49,16 @@ VanaView generates missing mipmaps from supported game textures. Mipmaps are sma
 | Setting | Default | What it changes |
 | --- | --- | --- |
 | **Fog** | Game | **Game** keeps the usual fog distance for the current weather as you extend your view. **Distance** scales the fog with **Draw distance**. |
-| **Simple actor shadows in Normal** | On | Gives characters, including your own, simple ground shadows when the game’s **Shadows** setting is **Normal**. |
+| **Simple actor shadows in Normal** | Off | Gives characters, including your own, simple ground shadows when the game’s **Shadows** setting is **Normal**. |
 | **Terrain shadow range** | Full | In **Normal**, **Full** lets shadows follow the ground even on distant slopes. **Native** uses the game’s usual terrain-following range. |
 
 Set **Shadows** in the game to **High** for detailed silhouettes or **Off** to disable character shadows.
 
 ## Per-zone settings
 
-VanaView uses one global profile by default. In `/vv`, expand **Zone settings** and enable **Use zone profiles** to save **Draw distance**, **Map LoD** and **Fog** for individual zones. Changes in the menu are saved automatically. Zones without a saved profile use the global settings.
+VanaView uses one global profile by default. In `/vv`, enable **Use zone profiles** at the top of the window to save **Draw distance**, **Object range**, **Map LoD**, **Fog**, **Extend distant terrain**, **Ground mipmaps** and **Foliage mipmaps** for individual zones. Changes in the menu take effect immediately as a preview. Click **Apply** to save the profile. The button is disabled when there are no pending edits. Closing the window or changing zone/profile restores the saved settings if you have not clicked Apply. Chat commands remain immediate. Zones without a saved profile use the global settings. Existing zone profiles inherit the global Terrain settings until you save changes for that zone. Turning zone profiles off restores the global settings. **Use global defaults for this zone** removes only the current zone profile after **Apply**; other profiles are kept. Applying different settings creates a new profile for that zone. Returning all profile settings to their global values removes the redundant zone profile when you click **Apply**.
 
-**Object range**, mipmaps and shadows apply across zones. To turn off terrain extension in the current zone, use **Disable terrain extension here**. This switch works with either profile mode. VanaView stores preferences in `config/plugins/VanaView.ini`.
+Shadows apply across zones. In global mode, **Disable extension in this zone** provides a zone-only exception. Existing exclusions are preserved. With zone profiles enabled, an existing exclusion appears beside the terrain control; **Use profile terrain setting** removes it. VanaView stores preferences in `config/plugins/VanaView.ini`.
 
 ## In-game examples
 
@@ -87,7 +91,7 @@ Look at the orange trees on the left and the ridge beyond the fence. With **Game
 
 - Run `/vv help` for the command list. Use `/vv mip off` or `/vv mip on` to switch both mipmap settings together. Use `/vv coverage` to highlight scenery using VanaView mipmaps in green and `/vv coverage off` to clear the overlay.
 - With dgVoodoo, set **DirectX → Mipmapping** to **App driven**. Trilinear and 8× anisotropic filtering have been tested. VanaView reuses generated ground mipmaps from a local disk cache capped at 64 MiB.
-- **Restore defaults** in `/vv` asks for confirmation before resetting settings and turning off zone profiles. Press **Esc** or choose **Cancel** to keep your settings. The chat command `/vv reset` applies the defaults immediately.
+- **Restore defaults** in `/vv` asks for confirmation, then previews the defaults and turns off zone profiles. Click **Apply** to save them. Press **Esc** or choose **Cancel** to keep your settings. The chat command `/vv reset` applies the defaults immediately.
 
 ### Reporting a stutter
 
