@@ -100,10 +100,11 @@ int wmain(int argc, wchar_t** argv)
     assert(layout);
     auto* setting=reinterpret_cast<DWORD*>(mapped+layout->setting);
     NormalShadows control;
-    assert(control.simple && control.requested==TerrainRange::Full);
+    assert(!control.simple && control.requested==TerrainRange::Full);
     assert(control.sync(nullptr));
     assert(control.sync(mapped,true));
     assert(matches(mapped,false) && terrain_matches(mapped,TerrainRange::Native));
+    control.simple=true;
     for (DWORD choice : {2u,0u,2u,1u,0u}) {
         *setting=choice;
         assert(control.sync(mapped));

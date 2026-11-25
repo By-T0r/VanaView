@@ -8,7 +8,7 @@ VanaView is a graphics plugin for Final Fantasy XI on Ashita v4. It lets you see
 
 ### Drawdistance compatibility
 
-VanaView 2.11 blocks `/drawdistance` commands and attempts to load or reload that addon while VanaView is loaded. This applies in both **Game** and **Distance** fog modes. Use `/vv` to adjust draw distance instead.
+VanaView blocks `/drawdistance` commands and attempts to load or reload that addon while VanaView is loaded. This applies in both **Game** and **Distance** fog modes. Use `/vv` to adjust draw distance instead.
 
 If `drawdistance` was already loaded, its commands are still blocked, but VanaView does not unload it automatically or undo changes it made beforehand. Run `/addon unload drawdistance` and remove it from your startup script. If you already changed distances with the addon in the current session, restart the game with only VanaView controlling draw distance so those earlier values are not carried over.
 
@@ -20,7 +20,7 @@ The separate `distance` addon remains compatible. VanaView's draw distance, obje
 2. If VanaView is loaded, run `/unload vanaview`. Extract the ZIP into your Ashita folder. It already contains `plugins/VanaView.dll`.
 3. Run `/load vanaview`, then `/vv` to open the settings in game.
 
-The settings window starts with plain-language descriptions. Open **Quick guide** for a short guide, or enable **Technical descriptions** at the bottom to show the names used below. This display preference is saved automatically for the next load and does not save the graphics profile. Keep **Draw distance** at **20 or lower** and **Object range** at **1.50x or lower** to limit the risk of low FPS.
+The settings window uses technical descriptions by default. Open **Quick guide** for a short guide, or enable **Friendly descriptions** for plain-language labels and help. This display preference is saved automatically for the next load and does not save the graphics profile. Keep **Draw distance** at **20 or lower** and **Object range** at **1.50x or lower** to limit the risk of low FPS.
 
 Use **Disable effects** / **Enable effects** in the footer for a temporary comparison. This suspends VanaView effects without changing your saved profile or pending edits. Other plugins and graphics wrappers remain active. Reloading VanaView enables its effects again. The button waits at least three seconds between clicks and, with effects on, until queued mipmaps finish. Keep the camera still for the comparison.
 
@@ -31,9 +31,9 @@ Use **Disable effects** / **Enable effects** in the footer for a temporary compa
 | Setting | Default | What it changes |
 | --- | --- | --- |
 | **Draw distance** | 20 | Adjusts scenery draw distance. The slider runs from 1 to 40 in whole steps; 20 or lower is recommended. |
-| **Object range** | 1× | Extends the distance at which map objects such as trees and bushes appear. You can adjust it independently of **Draw distance**, from 1× to 4× in 0.25× steps. |
+| **Object range** | 1.25× | Extends the distance at which map objects such as trees and bushes appear. You can adjust it independently of **Draw distance**, from 1× to 4× in 0.25× steps. |
 | **Map LoD** | Full | **Full** uses the most detailed model available for visible map objects, reducing sudden changes as you approach. **Game** switches between models at the usual distances. |
-| **Extend distant terrain** | On | On compatible maps, helps keep distant terrain in view as you turn the camera. For example, it can keep the mountains northwest of the Crag of Dem in view from more angles at Konschtat Highlands (H-6). |
+| **Enable extension** | On | On compatible maps, helps keep distant terrain in view as you turn the camera. For example, it can keep the mountains northwest of the Crag of Dem in view from more angles at Konschtat Highlands (H-6). |
 
 Higher **Draw distance** and **Object range** can lower FPS, especially in areas with dense scenery. **Object range above 1.50× is not recommended.**
 
@@ -56,9 +56,17 @@ Set **Shadows** in the game to **High** for detailed silhouettes or **Off** to d
 
 ## Per-zone settings
 
-VanaView uses one global profile by default. In `/vv`, enable **Use zone profiles** at the top of the window to save **Draw distance**, **Object range**, **Map LoD**, **Fog**, **Extend distant terrain**, **Ground mipmaps** and **Foliage mipmaps** for individual zones. Changes in the menu take effect immediately as a preview. Click **Apply** to save the profile. The button is disabled when there are no pending edits. Closing the window or changing zone/profile restores the saved settings if you have not clicked Apply. Chat commands remain immediate. Zones without a saved profile use the global settings. Existing zone profiles inherit the global Terrain settings until you save changes for that zone. Turning zone profiles off restores the global settings. **Use global defaults for this zone** removes only the current zone profile after **Apply**; other profiles are kept. Applying different settings creates a new profile for that zone. Returning all profile settings to their global values removes the redundant zone profile when you click **Apply**.
+New installations start with one global profile and an **Object range** of **1.25x**. Updating keeps saved ranges and existing zone profiles.
 
-Shadows apply across zones. In global mode, **Disable extension in this zone** provides a zone-only exception. Existing exclusions are preserved. With zone profiles enabled, an existing exclusion appears beside the terrain control; **Use profile terrain setting** removes it. VanaView stores preferences in `config/plugins/VanaView.ini`.
+**To edit global settings while using zone profiles**
+
+1. Turn off **Use zone profiles**.
+2. Edit the global values and click **Apply**.
+3. Turn **Use zone profiles** back on and click **Apply** again.
+
+With zone profiles enabled, edits to visibility, terrain extension and mipmaps apply to the current zone. Zones without a custom profile inherit the global settings. Edits preview immediately. Click **Apply** to save before closing the window or switching profiles. To remove the current zone's override, choose **Use global defaults for this zone** and click **Apply**.
+
+Shadows apply across zones. Under Terrain, **Enable extension** edits the global default or the current zone according to the selected profile. An existing zone exclusion appears unchecked when editing that zone. Check the box and click **Apply** to enable the extension there. VanaView stores preferences in `config/plugins/VanaView.ini`.
 
 ## In-game examples
 
@@ -89,13 +97,18 @@ Look at the orange trees on the left and the ridge beyond the fence. With **Game
 
 ## Commands and troubleshooting
 
-- Run `/vv help` for the command list. Use `/vv mip off` or `/vv mip on` to switch both mipmap settings together. Use `/vv coverage` to highlight scenery using VanaView mipmaps in green and `/vv coverage off` to clear the overlay.
+- `/vv` or `/vanaview` opens or closes settings. Use `/vv help` for available commands and `/vv status` for draw distance, map LoD and fog.
+- `/vv mip on` and `/vv mip off` save both mipmap switches together for the active profile. Apply or close pending menu edits first. Use `/vv mip` or `/vv mip status` to inspect mipmap settings and counters.
+- `/vv coverage` toggles the green mipmap overlay. Use `on`, `off` or `status` for explicit control.
 - With dgVoodoo, set **DirectX → Mipmapping** to **App driven**. Trilinear and 8× anisotropic filtering have been tested. VanaView reuses generated ground mipmaps from a local disk cache capped at 64 MiB.
-- **Restore defaults** in `/vv` asks for confirmation, then previews the defaults and turns off zone profiles. Click **Apply** to save them. Press **Esc** or choose **Cancel** to keep your settings. The chat command `/vv reset` applies the defaults immediately.
+- **Reset global settings** in global mode previews factory graphics defaults, including shadows. Click **Apply** to save. Saved zone profiles, terrain exclusions and the description preference are kept.
+- **Reset all settings** in `/vv` asks for confirmation, then previews the defaults and turns off zone profiles. Click **Apply** to reset the interface preference and clear every saved zone profile and terrain exclusion, including zones you are not in. Press **Esc** or choose **Cancel** to keep your settings.
+
+Updating from v2.12? Move individual graphics settings and resets from chat macros to the settings window. The old distance, object range, LoD, fog, zone, terrain, foliage and reset commands have been removed.
 
 ### Reporting a stutter
 
-Open `/vv` and click **Save diagnostic report** soon after the stutter. The chat message gives you the filename under `logs/VanaView` in your Ashita folder. The report contains up to 900 recent frame intervals, zone IDs, graphics settings and mipmap cache counters. You can review the local text file and attach it to an [issue](https://github.com/By-T0r/VanaView/issues) with a short description of what you were doing in game.
+Open `/vv` and click **Diagnostic report** soon after the stutter. The chat message gives you the filename under `logs/VanaView` in your Ashita folder. The report contains up to 900 recent frame intervals, zone IDs, graphics settings and mipmap cache counters. You can review the local text file and attach it to an [issue](https://github.com/By-T0r/VanaView/issues) with a short description of what you were doing in game.
 
 ## Rendering scope
 
@@ -114,7 +127,7 @@ Run `./build.ps1 -Test` for command, configuration and rendering regressions. Th
 
 Run `./tools/Verify-Release.ps1 -Destination ../vanaview-release-check` to rebuild and test a committed candidate in a fresh checkout. The script accepts the optional fixture arguments, compares the rebuilt DLL with the committed DLL and prints the SHA-256.
 
-In game, cycle **Normal → High → Off → Normal**, then compare **Native** and **Full** terrain shadow range on a slope. Make a zone round trip with ground mipmaps enabled, save a diagnostic report and open the file named in chat. Open **Restore defaults**, press **Esc** and verify your settings. Tag the verified commit and use its `dist/VanaView.dll` for the release.
+In game, cycle **Normal → High → Off → Normal**, then compare **Native** and **Full** terrain shadow range on a slope. Make a zone round trip with ground mipmaps enabled, save a diagnostic report and open the file named in chat. Open **Reset all settings**, press **Esc** and verify your settings. Tag the verified commit and use its `dist/VanaView.dll` for the release.
 
 </details>
 

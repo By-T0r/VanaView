@@ -282,7 +282,7 @@ namespace
     constexpr float kMaxDrawDistance = 100.0f; // Original mapping preserves existing slider values.
     constexpr float kDrawDistanceSliderPower = 2.0f;
     constexpr float kDefaultDrawDistanceSlider = 20.0f;
-    constexpr float kDefaultPropRange = 1.0f;
+    constexpr float kDefaultPropRange = 1.25f;
     constexpr float kLodRangeMin = 0.25f;
     constexpr float kLodRangeMax = 10.0f;
     constexpr int kConfigVersion = 9;
@@ -499,7 +499,7 @@ public:
     const char* GetAuthor(void) const override { return "rockerudon and By-T0r"; }
     const char* GetDescription(void) const override { return "Tunes world draw distance, map LoD, fog, and ground texture filtering."; }
     const char* GetLink(void) const override { return ""; }
-    double GetVersion(void) const override { return 2.12; }
+    double GetVersion(void) const override { return 2.13; }
     // The standard Addons plugin uses priority 0. Block conflicting commands before Lua runs.
     int32_t GetPriority(void) const override { return -1; }
 
@@ -588,205 +588,39 @@ public:
             return true;
         }
 
-        discard_ui_preview();
-        if (iequals(sub,"grass") || iequals(sub,"flowers") || iequals(sub,"fan") || iequals(sub,"palm")) {
-            const char* arg=strtok_s(nullptr," \t",&context);
-            if(!arg || iequals(arg,"status")) queue_mip_settings();
-            else if(iequals(arg,"on")) queue_mip_settings({}, true);
-            else if(iequals(arg,"off")) queue_mip_settings({}, false);
-            else chat("Use /vv %s on | off | status (shared foliage setting).", sub);
-            return true;
-        }
-        if (iequals(sub, "help"))
-        {
-            print_help();
-            return true;
-        }
-
-        if (iequals(sub, "status"))
-        {
+        const char* arg = strtok_s(nullptr, " \t", &context);
+        const bool extra = strtok_s(nullptr, " \t", &context) != nullptr;
+        if (iequals(sub, "status") && !arg) {
             print_status();
             return true;
         }
-
-        if (iequals(sub, "proprange"))
-        {
-            const char* value = strtok_s(nullptr, " \t", &context);
-            if (!value || iequals(value, "status"))
-                chat("Object range %.2fx", double(m_propRange));
+        if (iequals(sub, "coverage")) {
+            int request = 0;
+            if (!arg) request = 1;
+            else if (iequals(arg,"on")) request = 2;
+            else if (iequals(arg,"off")) request = 3;
+            else if (iequals(arg,"status")) request = 4;
+            if (!request || extra) chat("Usage: /vv coverage [on|off|status]");
             else {
-                char* end = nullptr;
-                const float range = iequals(value, "off") ? 1.0f : std::strtof(value, &end);
-                if ((end && (*end || end == value)) || !(range >= 1 && range <= 4))
-                    chat("/vv proprange <1-4> | off | status");
-                else
-                    save_prop_range(range);
+                std::lock_guard lock(m_mipMutex);
+                m_coverageRequests.push_back(request);
             }
             return true;
         }
-
-        if (iequals(sub, "terraingroups"))
-        {
-            const char* mode = strtok_s(nullptr, " \t", &context);
-            const char* scopeValue = strtok_s(nullptr, " \t", &context);
-            if (strtok_s(nullptr, " \t", &context))
-                print_terrain_group_help();
-            else
-                handle_terrain_groups(mode, scopeValue);
+        if (iequals(sub, "mip")) {
+            if (extra) chat("Usage: /vv mip [on|off|status]");
+            else if (!arg || iequals(arg,"status")) queue_mip_settings();
+            else if (iequals(arg,"on") || iequals(arg,"off")) {
+                if (draft_pending()) chat("Apply or close the settings preview before changing mipmaps.");
+                else {
+                    discard_ui_preview();
+                    const bool enabled = iequals(arg,"on");
+                    queue_mip_settings(enabled, enabled);
+                }
+            } else chat("Usage: /vv mip [on|off|status]");
             return true;
         }
-
-        if (iequals(sub,"coverage")) {
-            const char* arg=strtok_s(nullptr," \t",&context);
-            if(!arg) m_coverageRequest.store(1);
-            else if(iequals(arg,"on")) m_coverageRequest.store(2);
-            else if(iequals(arg,"off")) m_coverageRequest.store(3);
-            else if(iequals(arg,"status")) m_coverageRequest.store(4);
-            else chat("Usage: /vv coverage [on|off|status]");
-            return true;
-        }
-        if (iequals(sub, "mip"))
-        {
-            const char* action = strtok_s(nullptr, " \t", &context);
-            if (!action || iequals(action, "status")) {
-                queue_mip_settings();
-            }
-            else if (iequals(action, "on")) queue_mip_settings(true, true);
-            else if (iequals(action, "off")) queue_mip_settings(false, false);
-            else chat("/vv mip on | off | status");
-            return true;
-        }
-
-        if (iequals(sub, "reset"))
-        {
-            restore_default_runtime();
-            save_config();
-            chat("Default restored.");
-            return true;
-        }
-
-        if (iequals(sub, "zone"))
-        {
-            const char* value = strtok_s(nullptr, " \t", &context);
-            if (value == nullptr || iequals(value, "status"))
-            {
-                chat(
-                    "Zone profiles: %s zone=%u profile=%s",
-                    m_useZoneProfiles ? "on" : "off",
-                    static_cast<unsigned int>(m_currentZoneId),
-                    m_activeZoneHasProfile ? "zone" : "global");
-                return true;
-            }
-            if (iequals(value, "on"))
-            {
-                set_zone_profiles_enabled(true);
-                chat("Zone profiles enabled.");
-                return true;
-            }
-            if (iequals(value, "off"))
-            {
-                set_zone_profiles_enabled(false);
-                chat("Zone profiles disabled.");
-                return true;
-            }
-            chat("Usage: /vv zone on | off | status");
-            return true;
-        }
-
-        if (iequals(sub, "distance"))
-        {
-            const char* value = strtok_s(nullptr, " \t", &context);
-            if (value == nullptr)
-            {
-                chat("Distance: %.0f", static_cast<double>(draw_distance_to_slider(m_drawDistance)));
-                return true;
-            }
-            if (iequals(value, "default"))
-            {
-                restore_draw_distances();
-                sync_default_draw_distance();
-                save_config();
-                chat("Draw distance restored to default.");
-                return true;
-            }
-            char* end = nullptr;
-            const float parsed = std::strtof(value, &end);
-            if (end == value || *end || !std::isfinite(parsed))
-            {
-                chat("Usage: /vv distance <1-40> | default");
-                return true;
-            }
-            if (parsed <= 0.0f)
-            {
-                restore_draw_distances();
-                sync_default_draw_distance();
-                save_config();
-                chat("Draw distance restored to default.");
-                return true;
-            }
-            const float distance = slider_to_draw_distance(parsed);
-            m_drawDistance = distance;
-            apply_draw_distances();
-            save_config();
-            chat("Distance set to %.0f.", static_cast<double>(draw_distance_to_slider(distance)));
-            return true;
-        }
-
-        if (iequals(sub, "lod"))
-        {
-            const char* mode = strtok_s(nullptr, " \t", &context);
-            if (mode == nullptr || iequals(mode, "status"))
-            {
-                print_lod_status();
-                return true;
-            }
-            if (iequals(mode, "full") || iequals(mode, "high"))
-            {
-                m_lodMode = LodMode::High;
-                const bool ok = apply_lod_mode();
-                save_config();
-                chat(ok ? "LoD mode: full." : "LoD full failed. Signature mismatch.");
-                return true;
-            }
-            if (iequals(mode, "game") || iequals(mode, "default"))
-            {
-                m_lodMode = LodMode::Off;
-                m_lodRangeScale = 1.0f;
-                restore_lod_patches();
-                save_config();
-                chat("LoD restored to default.");
-                return true;
-            }
-            chat("Usage: /vv lod full | game");
-            return true;
-        }
-
-        if (iequals(sub, "fog"))
-        {
-            const char* mode = strtok_s(nullptr, " \t", &context);
-            if (mode == nullptr || iequals(mode, "status"))
-            {
-                print_fog_status();
-                return true;
-            }
-            if (iequals(mode, "distance") || iequals(mode, "linked") || iequals(mode, "default"))
-            {
-                set_fog_mode(FogMode::DistanceLinked);
-                save_config();
-                chat("Fog mode: distance-linked.");
-                return true;
-            }
-            if (iequals(mode, "game") || iequals(mode, "natural"))
-            {
-                set_fog_mode(FogMode::Game);
-                save_config();
-                chat("Fog mode: game values.");
-                return true;
-            }
-            chat("Usage: /vv fog game | distance | status");
-            return true;
-        }
-
+        if (!iequals(sub,"help") || arg) chat("Unknown VanaView command or argument.");
         print_help();
         return true;
     }
@@ -832,7 +666,12 @@ public:
             chat("Automatic mipmaps stopped: could not prepare the texture cache.");
         }
         process_mip_command();
-        if(int request=m_coverageRequest.exchange(0)) {
+        std::vector<int> requests;
+        {
+            std::lock_guard lock(m_mipMutex);
+            requests.swap(m_coverageRequests);
+        }
+        for (int request : requests) {
             auto& coverage=m_mipmaps.coverage;
             if(request!=4) {
                 bool enable=request==1?!coverage.enabled:request==2;
@@ -879,7 +718,7 @@ public:
     }
 
 private:
-    std::atomic<int> m_coverageRequest{0};
+    std::vector<int> m_coverageRequests;
     SceneryMipmaps m_scenery;
     template<class Draw>
     bool draw_scenery(D3DPRIMITIVETYPE type,Draw submit) {
@@ -978,13 +817,6 @@ private:
         }
     }
 
-    void save_mip_preference(const char* key, bool enabled)
-    {
-        if (std::strcmp(key, "ground") == 0) m_scenery.groundEnabled = enabled;
-        else m_scenery.foliageEnabled = enabled;
-        save_config();
-    }
-
     void process_mip_command()
     {
         MipRequest request;
@@ -992,14 +824,10 @@ private:
             std::lock_guard lock(m_mipMutex);
             request=std::exchange(m_mipRequest, MipRequest{});
         }
-        if (request.ground.has_value()) {
-            m_scenery.groundEnabled=*request.ground;
-            save_mip_preference("ground", *request.ground);
-            m_mipStartupPending=true;
-        }
-        if (request.foliage.has_value()) {
-            m_scenery.foliageEnabled=*request.foliage;
-            save_mip_preference("foliage", *request.foliage);
+        if (request.ground || request.foliage) {
+            if (request.ground) m_scenery.groundEnabled=*request.ground;
+            if (request.foliage) m_scenery.foliageEnabled=*request.foliage;
+            save_config();
             m_mipStartupPending=true;
         }
         if (m_effectsEnabled && m_device && std::exchange(m_mipStartupPending, false)) {
@@ -1025,18 +853,10 @@ private:
 
     void print_help()
     {
-        chat("/vv proprange <1-4> | off | status");
-        print_terrain_group_help();
-        chat("/vv coverage [on|off|status] - highlight mipmapped draws");
-        chat("/vv opens the configuration window");
-        chat("/vv distance <1-40> | default");
-        chat("/vv lod full | game");
-        chat("/vv fog game | distance | status");
-        chat("/vv zone on | off | status");
-        chat("/vv reset");
-        chat("/vv status");
-        chat("/vv mip [on|off|status] - both ground and foliage mipmaps");
-        chat("/vv grass|flowers|fan|palm on/off - shared foliage mipmap setting");
+        chat("/vv or /vanaview - open or close settings");
+        chat("/vv help | /vv status - list commands or show draw distance, map LoD and fog");
+        chat("/vv mip [on|off|status] - switch both mipmap settings or show status");
+        chat("/vv coverage [on|off|status] - toggle or inspect the green mipmap overlay");
     }
 
     void print_status()
@@ -1048,11 +868,6 @@ private:
             static_cast<double>(m_lodRangeScale),
             (m_worldDistanceAddress != 0 && m_entityDistanceAddress != 0) ? "ok" : "missing");
         print_fog_status();
-    }
-
-    void print_lod_status()
-    {
-        chat("LoD mode: %s range=%.2fx", lod_mode_name(), static_cast<double>(m_lodRangeScale));
     }
 
     const char* lod_mode_name() const
@@ -1068,12 +883,6 @@ private:
     {
         // Legacy Custom (1) profiles now use the native weather calculation.
         return value == 0 ? FogMode::DistanceLinked : FogMode::Game;
-    }
-
-    void set_fog_mode(const FogMode mode)
-    {
-        m_fogMode = mode;
-        apply_active_fog_mode();
     }
 
     void apply_active_fog_mode()
@@ -1163,8 +972,9 @@ private:
     };
     std::optional<SettingsDraft> m_uiDraft;
     std::optional<SettingsDraft> m_uiSaved;
-    bool m_technicalDescriptions=false;
+    bool m_technicalDescriptions=true;
     bool m_uiSaveFailed=false;
+    bool m_resetAllPending=false;
     bool m_configWriteFailed=false;
     bool write_config_value(const char* section,const char* key,const char* value,const char* path) {
         const bool ok=::WritePrivateProfileStringA(section,key,value,path)!=0;
@@ -1200,7 +1010,7 @@ private:
         assign_settings(saved);
         return result;
     }
-    bool draft_pending() const { return m_uiDraft && (m_uiSaveFailed || !(*m_uiDraft==m_uiSaved.value_or(current_settings()))); }
+    bool draft_pending() const { return m_uiDraft && (m_resetAllPending || m_uiSaveFailed || !(*m_uiDraft==m_uiSaved.value_or(current_settings()))); }
     bool preview_ui_draft() {
         if (!m_uiDraft || *m_uiDraft==current_settings()) return true;
         const auto before=current_settings();
@@ -1226,23 +1036,62 @@ private:
                 m_shadowUpdate=true;
             }
         }
-        m_uiSaved.reset(); m_uiDraft.reset(); m_uiSaveFailed=false;
+        m_uiSaved.reset(); m_uiDraft.reset(); m_uiSaveFailed=false; m_resetAllPending=false;
     }
+    SettingsDraft default_graphics_settings(bool excluded) const {
+        return SettingsDraft{default_draw_distance(),kDefaultPropRange,1.0f,LodMode::High,FogMode::Game,
+            false,true,true,true,shadows::NormalShadows::defaultSimple,excluded,shadows::NormalShadows::defaultRange};
+    }
+    bool stage_factory_defaults() {
+        m_uiDraft=default_graphics_settings(false);
+        m_resetAllPending=preview_ui_draft();
+        if (!m_resetAllPending) m_uiDraft=current_settings();
+        return m_resetAllPending;
+    }
+
+    bool save_factory_reset() {
+        // Publish one complete INI so every zone is reset together, including unvisited zones.
+        char original[MAX_PATH]{}, directory[MAX_PATH]{}, temporary[MAX_PATH]{};
+        strcpy_s(original,m_configPath);
+        strcpy_s(directory,original);
+        char* slash=std::strrchr(directory,'\\');
+        if (!slash) return false;
+        slash[1]='\0';
+        if (!::GetTempFileNameA(directory,"vvr",0,temporary)) return false;
+        strcpy_s(m_configPath,temporary);
+        save_shadow_settings();
+        save_config();
+        ::WritePrivateProfileStringA(nullptr,nullptr,nullptr,temporary);
+        strcpy_s(m_configPath,original);
+        if (m_configWriteFailed || !::MoveFileExA(temporary,original,MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            ::DeleteFileA(temporary);
+            return false;
+        }
+        m_activeZoneHasProfile=false;
+        m_technicalDescriptions=true;
+        return true;
+    }
+
     bool apply_ui_draft() {
         if (!draft_pending()) return true;
         if (!preview_ui_draft()) return false;
         const auto d=*m_uiDraft;
         m_configWriteFailed=false;
         m_uiSaveFailed=true;
-        save_shadow_settings();
-        if (m_currentZoneId) {
-            char key[8]{}; std::snprintf(key,sizeof(key),"%u",unsigned(m_currentZoneId));
-            if (!write_config_value("terrain_groups_excluded",key,d.excluded?"1":nullptr,m_configPath)) {
-                chat("Could not save the terrain exclusion."); return false;
+        if (m_resetAllPending) {
+            if (!save_factory_reset()) { chat("Could not save the reset. Check config write access and retry Apply."); return false; }
+            m_resetAllPending=false;
+        } else {
+            save_shadow_settings();
+            if (m_currentZoneId) {
+                char key[8]{}; std::snprintf(key,sizeof(key),"%u",unsigned(m_currentZoneId));
+                if (!write_config_value("terrain_groups_excluded",key,d.excluded?"1":nullptr,m_configPath)) {
+                    chat("Could not save the terrain exclusion."); return false;
+                }
             }
+            save_config();
+            if (m_configWriteFailed) { chat("Could not save all settings. Check write access and retry Apply."); return false; }
         }
-        save_config();
-        if (m_configWriteFailed) { chat("Could not save all settings. Check write access and retry Apply."); return false; }
         m_uiSaveFailed=false;
         m_uiDraft=current_settings();
         m_uiSaved.reset();
@@ -1264,7 +1113,7 @@ private:
         gui->PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(7.0f * scale, 2.0f * scale));
         gui->PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f * scale);
         gui->SetNextWindowSize(ImVec2(480.0f * scale,
-            std::min(645.0f * scale, std::max(240.0f, gui->GetIO().DisplaySize.y - 40.0f * scale))), ImGuiCond_Always);
+            std::min(645.0f * scale + 2.0f * gui->GetTextLineHeightWithSpacing(), std::max(240.0f, gui->GetIO().DisplaySize.y - 40.0f * scale))), ImGuiCond_Always);
         const auto section = [&](const char* title) {
             gui->Spacing();
             gui->PushFont(nullptr, bodyFont * 1.08f);
@@ -1292,8 +1141,10 @@ private:
             gui->BeginChild("settingsContent", ImVec2(0.0f, -95.0f * scale));
             gui->BeginDisabled(!m_effectsEnabled);
             bool profiles = d.zones;
-            if (gui->Checkbox(wording("Different settings for each area###zoneProfiles", "Use zone profiles###zoneProfiles"), &profiles))
+            if (gui->Checkbox(wording("Different settings for each area###zoneProfiles", "Use zone profiles###zoneProfiles"), &profiles)) {
+                m_resetAllPending=false;
                 d=profile_draft(profiles);
+            }
             show_help_marker(gui, wording("Turn this on to tune each area separately. Areas you have not customized use your shared settings. Shadows always apply everywhere. Click Apply to save.", kZoneProfilesHelp));
             if (d.zones && m_currentZoneId)
                 gui->TextDisabled(wording("Area %u - %s", "Zone %u - %s"), unsigned(m_currentZoneId),
@@ -1301,12 +1152,21 @@ private:
             else
                 gui->TextDisabled("Shared settings for all areas");
             show_help_marker(gui, "Changes preview immediately. Apply saves the profile. Closing the window or changing zone/profile restores saved settings.");
+            gui->TextWrapped("%s", d.zones
+                ? "To edit global settings, turn off the checkbox above. Your zone profiles are kept."
+                : "Edit global settings and click Apply. To resume zone profiles, turn them back on and click Apply again.");
             if (d.zones && m_currentZoneId) {
                 gui->BeginDisabled(!m_activeZoneHasProfile && !draft_pending());
                 if (gui->Button(wording("Use shared settings here###globalZone", "Use global defaults for this zone###globalZone")))
                     d=profile_draft(true,true);
                 gui->EndDisabled();
                 show_help_marker(gui, "Click Apply to save the shared settings in this area again. Other areas keep their own settings.");
+            } else if (!d.zones) {
+                gui->BeginDisabled(m_resetAllPending);
+                if (gui->Button("Reset global settings"))
+                    d=default_graphics_settings(d.excluded);
+                gui->EndDisabled();
+                show_help_marker(gui, "Preview factory defaults for global graphics settings, including shadows. Click Apply to save. Saved zone profiles and terrain exclusions are kept.");
             }
             section(wording("See more of the world", "Visibility"));
             int distance = static_cast<int>(std::lround(draw_distance_to_slider(d.distance)));
@@ -1357,24 +1217,16 @@ private:
             }
 
             section(wording("Steadier scenery", "Terrain"));
-            bool groups = d.terrain;
-            if (gui->Checkbox(wording("Keep distant terrain visible###terrain", "Extend distant terrain###terrain"), &groups))
-                d.terrain=groups;
-            show_help_marker(gui, "Helps prevent distant hills and mountains from disappearing as you turn the camera, on supported maps. Keep it on unless you notice a problem in an area.");
-            const uint16_t terrainZone = get_current_zone();
-            if (terrainZone) {
-                if (d.zones && d.excluded) {
-                    gui->TextDisabled("Terrain extension is blocked in this zone.");
-                    if (gui->Button("Use profile terrain setting"))
-                        d.excluded=false;
-                    show_help_marker(gui, "Removes the existing zone exclusion so Extend distant terrain can take effect.");
-                } else if (!d.zones) {
-                    bool excluded = d.excluded;
-                    if (gui->Checkbox("Disable extension in this zone", &excluded))
-                        d.excluded=excluded;
-                    show_help_marker(gui, "A zone-only exception to the global terrain setting. Other zones are unaffected.");
-                }
+            const bool editingZone = d.zones && m_currentZoneId;
+            bool extensionEnabled = d.terrain && !(editingZone && d.excluded);
+            if (gui->Checkbox("Enable extension###terrain", &extensionEnabled)) {
+                d.terrain = extensionEnabled;
+                if (editingZone && extensionEnabled)
+                    d.excluded = false;
             }
+            show_help_marker(gui, editingZone
+                ? "Keeps distant terrain visible in this zone on supported maps. Click Apply to save."
+                : "Keeps distant terrain visible on supported maps. Zones with custom terrain settings keep their settings.");
             gui->Checkbox(wording("Reduce ground shimmer###ground", "Ground mipmaps###ground"), &d.ground);
             show_help_marker(gui, wording("Helps ground and other solid scenery look steadier while the camera moves. Keep it on if distant textures flicker.", "Generates mipmaps for supported terrain and opaque scenery textures."));
             gui->Checkbox(wording("Reduce shimmer on grass and leaves###foliage", "Foliage mipmaps###foliage"), &d.foliage);
@@ -1413,22 +1265,22 @@ private:
             gui->TextDisabled(m_effectsEnabled ? "VanaView: ON" : "VanaView: OFF");
             show_help_marker(gui,"Compare with VanaView effects disabled. Your profile and unsaved settings are kept. Other plugins and graphics wrappers are unaffected. Wait at least 3 seconds between clicks. When effects are on, the button also waits for queued mipmaps. Keep the camera still to compare. This comparison choice is not saved.");
             gui->PushFont(nullptr, bodyFont * 0.90f);
-            bool technical=m_technicalDescriptions;
-            if (gui->Checkbox("Technical descriptions", &technical))
-                set_technical_descriptions(technical);
-            show_help_marker(gui, "Shows technical names and explanations. Saved immediately for the next load, separately from graphics settings.");
+            bool friendly=!m_technicalDescriptions;
+            if (gui->Checkbox("Friendly descriptions", &friendly))
+                set_technical_descriptions(!friendly);
+            show_help_marker(gui, "Uses plain language for setting names and explanations. Saved immediately for the next load, separately from graphics settings.");
             const float guideWidth = gui->CalcTextSize("Quick guide").x + 2.0f * gui->GetStyle().FramePadding.x;
             gui->SameLine(gui->GetCursorPosX() + gui->GetContentRegionAvail().x - guideWidth);
             if (gui->Button("Quick guide")) gui->OpenPopup("VanaView quick guide");
             gui->PopFont();
-            recommendation(draft_pending() ? "Unsaved changes - click Apply." : "No pending changes.", draft_pending());
+            recommendation(m_resetAllPending ? "Apply deletes all saved zone profiles." : draft_pending() ? "Unsaved changes - click Apply." : "No pending changes.", draft_pending());
             const auto& style = gui->GetStyle();
             const auto buttonWidth = [&](const char* label) {
                 return gui->CalcTextSize(label).x + 2.0f * style.FramePadding.x;
             };
             const float available = gui->GetContentRegionAvail().x;
             const float left = gui->GetCursorPosX();
-            const float secondaryWidth = std::max(buttonWidth("Diagnostic report"), buttonWidth("Restore defaults"));
+            const float secondaryWidth = std::max(buttonWidth("Diagnostic report"), buttonWidth("Reset all settings"));
             const float minimumSaveWidth = std::max(90.0f * scale, buttonWidth("Apply"));
             const bool singleRow = 2.0f * secondaryWidth + 2.0f * style.ItemSpacing.x + minimumSaveWidth <= available;
             const float saveWidth = singleRow ? available - 2.0f * secondaryWidth - 2.0f * style.ItemSpacing.x : minimumSaveWidth;
@@ -1455,9 +1307,9 @@ private:
                 gui->SameLine(0.0f, style.ItemSpacing.x);
             else if (settingsWidth <= available)
                 gui->SetCursorPosX(left + available - settingsWidth);
-            constexpr auto resetDialog = "Restore VanaView defaults?";
+            constexpr auto resetDialog = "Reset global settings and all zones?";
             gui->BeginDisabled(!m_effectsEnabled);
-            if (gui->Button("Restore defaults", ImVec2(secondaryWidth, 0.0f)))
+            if (gui->Button("Reset all settings", ImVec2(secondaryWidth, 0.0f)))
                 gui->OpenPopup(resetDialog);
 
             if (settingsWidth <= available) gui->SameLine();
@@ -1494,17 +1346,15 @@ private:
             }
 
             if (gui->BeginPopupModal(resetDialog, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-                gui->TextUnformatted("Reset visibility, terrain, mipmaps and shadows?");
-                gui->TextUnformatted("This also turns off zone profiles.");
+                gui->TextUnformatted("Restore global settings and descriptions to their defaults?");
+                gui->TextUnformatted("Apply will delete every saved zone profile and terrain exclusion.");
                 gui->Spacing();
                 const bool cancel = gui->Button("Cancel") || gui->IsKeyPressed(ImGuiKey_Escape, false);
                 gui->SetItemDefaultFocus();
                 gui->SameLine();
-                if (gui->Button("Restore defaults") && !cancel) {
-                    d={default_draw_distance(),kDefaultPropRange,1.0f,LodMode::High,FogMode::Game,
-                        false,true,true,true,false,d.excluded,shadows::TerrainRange::Full};
-                        preview_ui_draft();
-                        gui->CloseCurrentPopup();
+                if (gui->Button("Reset all settings") && !cancel) {
+                    if (!stage_factory_defaults()) chat("Could not preview factory defaults.");
+                    gui->CloseCurrentPopup();
                 } else if (cancel) {
                     gui->CloseCurrentPopup();
                 }
@@ -1638,7 +1488,7 @@ private:
 
     void load_config()
     {
-        m_technicalDescriptions=::GetPrivateProfileIntA("interface","technical_descriptions",0,m_configPath)!=0;
+        m_technicalDescriptions=::GetPrivateProfileIntA("interface","technical_descriptions",1,m_configPath)!=0;
         m_shadows.simple=::GetPrivateProfileIntA("shadows","simple",shadows::NormalShadows::defaultSimple,m_configPath)!=0;
         m_shadows.requested=::GetPrivateProfileIntA("shadows","full_range",1,m_configPath) ? shadows::TerrainRange::Full : shadows::TerrainRange::Native;
         const int configVersion = ::GetPrivateProfileIntA("general", "version", 0, m_configPath);
@@ -1892,14 +1742,6 @@ private:
             safe_write(m_entityDistanceAddress, m_originalEntityDistance);
     }
 
-    void sync_default_draw_distance()
-    {
-        if (!m_originalDrawCaptured)
-            return;
-
-        m_drawDistance = clamp_float(m_originalWorldDistance, 1.0f, slider_to_draw_distance(kDistanceSliderMax));
-    }
-
     bool install_native_fog_scale()
     {
         if (m_fogScaleWorld.patched && m_fogScaleEntity.patched) return true;
@@ -2075,12 +1917,6 @@ private:
         save_config(false);
     }
 
-    void print_terrain_group_help()
-    {
-        chat("/vv terraingroups on | off | status");
-        chat("/vv terraingroups zone off | default");
-    }
-
     bool install_terrain_group_hook()
     {
         if (m_terrainGroupPatch.patched)
@@ -2123,50 +1959,6 @@ private:
         m_terrainGroupZoneExcluded = zoneId &&
             ::GetPrivateProfileIntA("terrain_groups_excluded", key, 0, m_configPath) != 0;
         publish_terrain_group_policy();
-    }
-
-    void handle_terrain_groups(const char* mode, const char* value)
-    {
-        const uint16_t zoneId = get_current_zone();
-        update_terrain_group_zone(zoneId);
-        if (!mode || (iequals(mode, "status") && !value))
-        {
-            chat("Terrain extension %s, zone %u %s.", m_terrainGroupsEnabled ? "on" : "off",
-                unsigned(zoneId), m_terrainGroupZoneExcluded ? "excluded" : "follows active profile");
-            return;
-        }
-
-        if (iequals(mode, "zone") && value && (iequals(value, "off") || iequals(value, "default")))
-        {
-            if (!zoneId)
-            {
-                chat("Enter a zone before changing its terrain groups setting.");
-                return;
-            }
-            const bool exclude = iequals(value, "off");
-            char key[8]{};
-            std::snprintf(key, sizeof(key), "%u", static_cast<unsigned int>(zoneId));
-            if (!write_config_value("terrain_groups_excluded", key, exclude ? "1" : nullptr, m_configPath))
-            {
-                chat("Could not save the terrain groups zone setting.");
-                return;
-            }
-            m_terrainGroupZoneExcluded = exclude;
-            publish_terrain_group_policy();
-            chat("Terrain groups: zone %u %s.", static_cast<unsigned int>(zoneId),
-                exclude ? "excluded" : "uses global setting");
-            return;
-        }
-
-        if (!value && (iequals(mode, "on") || iequals(mode, "off")))
-        {
-            const bool enable = iequals(mode, "on");
-            if (set_terrain_groups_enabled(enable))
-                chat("Terrain groups: active profile %s%s.", enable ? "on" : "off",
-                    enable && m_terrainGroupZoneExcluded ? " (current zone excluded)" : "");
-            return;
-        }
-        print_terrain_group_help();
     }
 
     void apply_terrain_profile()
@@ -2303,7 +2095,7 @@ private:
     BytesPatchSite m_lodPatchSites[2]{};
     BytesPatchSite m_lodRangePatchSites[4]{};
     BytesPatchSite m_terrainRangePatch{};
-    float m_propRange = 1.0f;
+    float m_propRange = kDefaultPropRange;
     BytesPatchSite m_terrainGroupPatch{};
     bool m_terrainGroupsEnabled = false;
     uint16_t m_terrainGroupZoneId = 0;

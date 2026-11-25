@@ -67,7 +67,7 @@ struct MipCommandTest {
         CHECK(report != empty);
         std::ifstream in(report);
         const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-        CHECK(text.find("VanaView 2.12 diagnostic report") != std::string::npos);
+        CHECK(text.find("VanaView 2.13 diagnostic report") != std::string::npos);
         CHECK(text.find("pauses): 900") != std::string::npos);
         CHECK(text.find("\nDraw distance: 20  Object range: ") != std::string::npos);
         CHECK(text.find("Median/p99/max (ms): 30.00 / 40.00 / 90.00") != std::string::npos);
@@ -127,21 +127,21 @@ struct MipCommandTest {
         plugin->finish_zone_distance(true,1500);
         CHECK(world==1.0f && entity==1.25f);
         plugin->Direct3DBeginScene(true);
-        CHECK(plugin->m_coverageRequest.load()==0);
+        CHECK(plugin->m_coverageRequests.empty());
         plugin->toggle_effects_from_ui(10000);
         CHECK(plugin->comparison_wait_seconds(10000)==3);
         CHECK(plugin->comparison_wait_seconds(12001)==1);
         plugin->toggle_effects_from_ui(12999);
         CHECK(plugin->m_effectsEnabled);
         CHECK(plugin->comparison_wait_seconds(13000)==0);
-        CHECK(plugin->m_coverageRequest.load()==0);
+        CHECK(plugin->m_coverageRequests.empty());
         CHECK(plugin->m_effectsEnabled && plugin->current_settings()==comparisonSettings && plugin->draft_pending());
         CHECK(world==plugin->m_drawDistance && entity==plugin->m_drawDistance);
         CHECK(plugin->set_effects_enabled(false));
         plugin->update_zone_profile(101);
         CHECK(!plugin->m_effectsEnabled && world==1.0f && entity==1.25f);
         CHECK(plugin->set_effects_enabled(true));
-        CHECK(plugin->m_coverageRequest.load()==0);
+        CHECK(plugin->m_coverageRequests.empty());
         plugin->m_currentZoneId=0;
         plugin->assign_settings(beforeComparison);
         plugin->m_uiDraft.reset();
@@ -151,25 +151,20 @@ struct MipCommandTest {
         CHECK(WritePrivateProfileStringA("mipmaps","foliage",nullptr,path));
         plugin->load_config();
         verify(false,false);
-        for (const char* alias : {"grass","flowers","fan","palm"}) {
-            const std::string prefix=std::string("/vv ")+alias;
-            command("/vv mip on");
-            command(prefix+" off");
-            command(prefix+" status");
+        plugin->m_windowOpen=false;
+        command("/VANAVIEW");
+        CHECK(plugin->m_windowOpen);
+        plugin->m_uiDraft=plugin->current_settings();
+        plugin->m_uiDraft->range=3.75f;
+        for (const char* input : {"/vv help", "/vv status", "/vv reset", "/vv mip off",
+                                  "/vv mip on extra", "/vv mip status", "/vv mip", "/vv bogus"}) {
+            command(input);
             plugin->process_mip_command();
-            verify(true,false);
-            plugin->load_config();
-            verify(true,false);
-
-            command("/vv mip off");
-            command(prefix+" on");
-            command("/vv mip status");
-            plugin->process_mip_command();
-            verify(false,true);
-            plugin->load_config();
-            verify(false,true);
+            CHECK(plugin->draft_pending());
+            verify(false,false);
         }
-        command("/vv palm off");
+        command("/vv");
+        CHECK(!plugin->m_windowOpen && !plugin->m_uiDraft);
         command("/vv mip on");
         plugin->process_mip_command();
         verify(true,true);
@@ -179,9 +174,11 @@ struct MipCommandTest {
         const auto packetFlag=static_cast<uint32_t>(Ashita::PluginFlags::UsePackets);
         CHECK(!(plugin->GetFlags() & packetFlag));
         command("/vv coverage trace");
-        CHECK(plugin->m_coverageRequest.load()==0);
-        command("/vv coverage on");
-        CHECK(plugin->m_coverageRequest.load()==2);
+        CHECK(plugin->m_coverageRequests.empty());
+        command("/vv coverage on extra");
+        CHECK(plugin->m_coverageRequests.empty());
+        plugin->load_config();
+        verify(false,false);
 
         // Persist distinct Terrain profiles, inherit globals for old/missing zones,
         // and never leak a zone edit back into the global defaults.
@@ -213,7 +210,10 @@ struct MipCommandTest {
         CHECK(plugin->m_terrainGroupsEnabled && !plugin->m_activeZoneHasProfile);
         plugin->save_prop_range(3.0f);
         CHECK(plugin->m_mipStartupPending);
-        plugin->save_mip_preference("foliage",true); // Same path as the menu.
+        plugin->m_uiDraft=plugin->current_settings();
+        plugin->m_uiDraft->foliage=true;
+        CHECK(plugin->apply_ui_draft());
+        plugin->discard_ui_preview();
         plugin->update_zone_profile(102);
         verify(false,false);
         CHECK(plugin->m_propRange==2.0f && g_propRangeScaleSquared==4.0f);
@@ -261,7 +261,10 @@ struct MipCommandTest {
         plugin->set_zone_profiles_enabled(true);
         plugin->save_prop_range(2.5f);
         CHECK(plugin->m_activeZoneHasProfile && plugin->profile_section_exists("zone.103"));
-        plugin->save_mip_preference("foliage",true);
+        plugin->m_uiDraft=plugin->current_settings();
+        plugin->m_uiDraft->foliage=true;
+        CHECK(plugin->apply_ui_draft());
+        plugin->discard_ui_preview();
         plugin->update_zone_profile(0);
         CHECK(plugin->m_currentZoneId==103);
         verify(true,true);
@@ -316,6 +319,26 @@ struct MipCommandTest {
         plugin->m_windowOpen=true;
         command("/vv"); // Closing restores the saved settings.
         CHECK(!plugin->m_uiDraft && plugin->m_propRange==2.0f);
+        CHECK(WritePrivateProfileStringA("terrain_groups_excluded","999","1",path));
+        plugin->m_uiDraft=plugin->default_graphics_settings(plugin->m_terrainGroupZoneExcluded);
+        CHECK(plugin->apply_ui_draft());
+        CHECK(plugin->read_profile_float("props","range",0)==kDefaultPropRange);
+        CHECK(plugin->read_profile_float("zone.103","object_range",0)==3.5f);
+        CHECK(plugin->read_profile_float("terrain_groups_excluded","999",0)==1);
+        CHECK(!plugin->m_technicalDescriptions);
+        CHECK(plugin->stage_factory_defaults() && plugin->draft_pending());
+        plugin->discard_ui_preview();
+        CHECK(plugin->profile_section_exists("zone.103"));
+        CHECK(plugin->profile_section_exists("terrain_groups_excluded"));
+        CHECK(plugin->stage_factory_defaults() && plugin->apply_ui_draft());
+        CHECK(!plugin->profile_section_exists("zone.103"));
+        CHECK(!plugin->profile_section_exists("zone.102"));
+        CHECK(!plugin->profile_section_exists("terrain_groups_excluded"));
+        plugin->load_config();
+        CHECK(plugin->m_technicalDescriptions && !plugin->m_useZoneProfiles);
+        CHECK(plugin->m_propRange==kDefaultPropRange);
+        CHECK(plugin->stage_factory_defaults() && plugin->draft_pending());
+        plugin->discard_ui_preview();
         plugin->m_terrainRangePatch.patched=false;
         plugin->restore_default_runtime();
         plugin->process_mip_command();
@@ -331,5 +354,5 @@ int main() {
     CHECK(WritePrivateProfileStringA("general","version","3",file));
     MipCommandTest::run(file);
     CHECK(DeleteFileA(file));
-    std::puts("PASS: four foliage aliases, global commands, status, profile capabilities, defaults and INI reload.");
+    std::puts("PASS: manual commands, preview isolation, profile capabilities, defaults and INI reload.");
 }
